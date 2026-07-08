@@ -8,9 +8,14 @@
 """
 
 import argparse
+import signal
 import subprocess
 import sys
 from pathlib import Path
+
+# 全局状态，用于 Ctrl+C 时终止当前编码并清理不完整文件
+_current_process = None
+_current_target_file = None
 
 VIDEO_EXTENSIONS = {'.mov', '.mp4', '.mkv', '.avi', '.wmv', '.flv', '.webm', '.ts', '.m4v'}
 
@@ -20,6 +25,23 @@ def run_command(cmd):
         return subprocess.run(cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as exc:
         return exc
+
+
+def signal_handler(sig, frame):
+    """处理 Ctrl+C：终止当前编码进程并删除不完整的目标文件。"""
+    global _current_process, _current_target_file
+    print('\n捕获到 Ctrl+C，正在停止编码并清理...')
+    if _current_process is not None and _current_process.poll() is None:
+        _current_process.terminate()
+        try:
+            _current_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _current_process.kill()
+            _current_process.wait()
+    if _current_target_file is not None and _current_target_file.exists():
+        _current_target_file.unlink()
+        print(f'已删除不完整文件: {_current_target_file}')
+    sys.exit(0)
 
 
 def detect_encoder():
@@ -98,7 +120,34 @@ def build_output_path(source_root: Path, target_root: Path, source_file: Path):
     return out_path
 
 
+def get_video_duration(file_path: Path) -> float:
+    """用 ffprobe 获取视频时长（秒），失败返回 0。"""
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        str(file_path)
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return float(result.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
+        return 0.0
+
+
+def format_duration(seconds: float) -> str:
+    """将秒数格式化为 HH:MM:SS。"""
+    h, remainder = divmod(int(seconds), 3600)
+    m, s = divmod(remainder, 60)
+    if h > 0:
+        return f'{h}:{m:02d}:{s:02d}'
+    else:
+        return f'{m}:{s:02d}'
+
+
 def transcode_file(source_file: Path, target_file: Path, encoder: str, force: bool = False):
+    global _current_process, _current_target_file
+
     if target_file.exists() and not force:
         print(f'跳过：目标已存在 {target_file}')
         return 'skipped'
@@ -110,13 +159,24 @@ def transcode_file(source_file: Path, target_file: Path, encoder: str, force: bo
 
     print(f'开始编码: {source_file} -> {target_file}')
     cmd = build_ffmpeg_command(source_file, target_file, encoder, force=force)
+
+    # 记录当前目标文件，以便 Ctrl+C 时清理
+    _current_target_file = target_file
+
     try:
-        subprocess.run(cmd, check=True)
+        _current_process = subprocess.Popen(cmd)
+        _current_process.wait()
+        if _current_process.returncode != 0:
+            print(f'错误: 编码失败 {source_file}，ffmpeg 返回码 {_current_process.returncode}')
+            return 'failed'
         print(f'完成: {target_file}')
         return 'done'
-    except subprocess.CalledProcessError as exc:
-        print(f'错误: 编码失败 {source_file}，ffmpeg 返回码 {exc.returncode}')
+    except Exception as exc:
+        print(f'错误: 编码过程中出现异常 {source_file}，{exc}')
         return 'failed'
+    finally:
+        _current_process = None
+        _current_target_file = None
 
 
 def main():
@@ -136,6 +196,9 @@ def main():
 
     target_root.mkdir(parents=True, exist_ok=True)
 
+    # 注册 Ctrl+C 信号处理器
+    signal.signal(signal.SIGINT, signal_handler)
+
     encoder, device_name = detect_encoder()
     print(f'检测到编码设备: {device_name}，使用编码器: {encoder}')
 
@@ -144,21 +207,44 @@ def main():
         print('未在源目录中找到视频文件。')
         return
 
-    print(f'共找到 {len(video_files)} 个视频文件，开始处理...')
+    print(f'共找到 {len(video_files)} 个视频文件，正在统计总时长...')
+
+    # 预扫描所有视频时长
+    file_durations = {}
+    total_duration = 0.0
+    for source_file in sorted(video_files):
+        dur = get_video_duration(source_file)
+        file_durations[source_file] = dur
+        total_duration += dur
+
+    print(f'总时长: {format_duration(total_duration)}')
+    print('开始处理...')
 
     success = 0
     skipped = 0
     failed = 0
+    completed_duration = 0.0
 
     for source_file in sorted(video_files):
         target_file = build_output_path(source_root, target_root, source_file)
         result = transcode_file(source_file, target_file, encoder, force=args.force)
         if result == 'done':
             success += 1
+            completed_duration += file_durations.get(source_file, 0)
         elif result == 'skipped':
             skipped += 1
+            completed_duration += file_durations.get(source_file, 0)
         else:
             failed += 1
+
+        # 显示进度
+        if total_duration > 0:
+            pct = completed_duration / total_duration * 100
+            print(f'进度: {pct:.1f}% ({format_duration(completed_duration)} / {format_duration(total_duration)})')
+        else:
+            done = success + skipped
+            total = len(video_files)
+            print(f'进度: {done}/{total}')
 
     print('处理完成。')
     print(f'成功: {success}，跳过: {skipped}，失败: {failed}')
