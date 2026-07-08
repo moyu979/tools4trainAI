@@ -121,7 +121,7 @@ def build_ffmpeg_command(input_path: Path, output_path: Path, encoder: str, forc
     if output_path.suffix.lower() != '.mp4':
         output_path = output_path.with_suffix('.mp4')
 
-    vf = 'scale=-2:640'
+    vf = "scale='if(gte(iw,ih),640,-2)':'if(gte(iw,ih),-2,640)'"
     command = ['ffmpeg', '-hide_banner', '-loglevel', 'error']
     if force:
         command += ['-y']
