@@ -21,6 +21,15 @@ VIDEO_EXTENSIONS = {'.mov', '.mp4', '.mkv', '.avi', '.wmv', '.flv', '.webm', '.t
 
 
 def run_command(cmd):
+    """运行 shell 命令并返回结果。
+
+    Args:
+        cmd (list[str]): 命令及其参数组成的列表。
+
+    Returns:
+        subprocess.CompletedProcess 或 subprocess.CalledProcessError: 命令成功时返回
+        CompletedProcess 对象，失败时返回 CalledProcessError 对象。
+    """
     try:
         return subprocess.run(cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as exc:
@@ -28,7 +37,14 @@ def run_command(cmd):
 
 
 def signal_handler(sig, frame):
-    """处理 Ctrl+C：终止当前编码进程并删除不完整的目标文件。"""
+    """处理 Ctrl+C 信号。
+
+    终止当前正在运行的编码进程，并删除对应的不完整目标文件。
+
+    Args:
+        sig (int): 信号编号。
+        frame (types.FrameType | None): 当前执行栈帧。
+    """
     global _current_process, _current_target_file
     print('\n捕获到 Ctrl+C，正在停止编码并清理...')
     if _current_process is not None and _current_process.poll() is None:
@@ -45,7 +61,17 @@ def signal_handler(sig, frame):
 
 
 def detect_encoder():
-    """检测本机 FFmpeg 可用的硬件编码器。"""
+    """检测本机 FFmpeg 可用的硬件编码器。
+
+    依次检查 NVIDIA NVENC、AMD AMF、Intel QSV、Apple VideoToolbox 等硬件编码器，
+    若均不可用则回退到 CPU 软件编码 libx264。
+
+    Returns:
+        tuple[str, str]: 第一个元素为编码器名称，第二个元素为编码设备描述文本。
+
+    Raises:
+        SystemExit: 当未找到 ffmpeg 可执行文件时退出程序。
+    """
     try:
         result = run_command(['ffmpeg', '-hide_banner', '-encoders'])
         if isinstance(result, subprocess.CalledProcessError):
@@ -78,7 +104,20 @@ def detect_encoder():
 
 
 def build_ffmpeg_command(input_path: Path, output_path: Path, encoder: str, force: bool = False):
-    """构建 ffmpeg 编码命令。"""
+    """构建 ffmpeg 编码命令。
+
+    根据编码器类型设置对应的编码参数（码率、质量等），
+    并应用缩放滤镜（高度 640，宽度自动等比缩放）。
+
+    Args:
+        input_path (Path): 源视频文件路径。
+        output_path (Path): 目标输出文件路径，非 .mp4 后缀会自动转换。
+        encoder (str): 编码器名称（如 h264_nvenc, libx264 等）。
+        force (bool): 是否强制覆盖已存在的输出文件。默认为 False。
+
+    Returns:
+        list[str]: 构建完成的 ffmpeg 命令行参数列表。
+    """
     if output_path.suffix.lower() != '.mp4':
         output_path = output_path.with_suffix('.mp4')
 
@@ -105,14 +144,42 @@ def build_ffmpeg_command(input_path: Path, output_path: Path, encoder: str, forc
 
 
 def is_video_file(path: Path):
+    """判断给定路径是否为受支持的视频文件。
+
+    Args:
+        path (Path): 待检查的文件路径。
+
+    Returns:
+        bool: 如果是文件且后缀属于 VIDEO_EXTENSIONS 则返回 True，否则返回 False。
+    """
     return path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
 
 
 def find_video_files(directory: Path):
+    """递归查找目录下所有受支持的视频文件。
+
+    Args:
+        directory (Path): 要搜索的根目录。
+
+    Returns:
+        list[Path]: 所有匹配的视频文件路径列表。
+    """
     return [p for p in directory.rglob('*') if is_video_file(p)]
 
 
 def build_output_path(source_root: Path, target_root: Path, source_file: Path):
+    """根据源文件路径生成目标输出路径。
+
+    保持源目录的相对目录结构，并将输出文件后缀统一为 .mp4。
+
+    Args:
+        source_root (Path): 源目录的根路径。
+        target_root (Path): 目标输出目录的根路径。
+        source_file (Path): 源视频文件的完整路径。
+
+    Returns:
+        Path: 目标输出文件的完整路径。
+    """
     rel = source_file.relative_to(source_root)
     out_path = target_root / rel
     if out_path.suffix.lower() != '.mp4':
@@ -121,7 +188,16 @@ def build_output_path(source_root: Path, target_root: Path, source_file: Path):
 
 
 def get_video_duration(file_path: Path) -> float:
-    """用 ffprobe 获取视频时长（秒），失败返回 0。"""
+    """获取视频文件的时长。
+
+    通过 ffprobe 读取视频文件时长信息，失败时返回 0。
+
+    Args:
+        file_path (Path): 视频文件路径。
+
+    Returns:
+        float: 视频时长（秒），获取失败时返回 0.0。
+    """
     cmd = [
         'ffprobe', '-v', 'error',
         '-show_entries', 'format=duration',
@@ -136,7 +212,16 @@ def get_video_duration(file_path: Path) -> float:
 
 
 def format_duration(seconds: float) -> str:
-    """将秒数格式化为 HH:MM:SS。"""
+    """将秒数格式化为可读的时间字符串。
+
+    时长不足一小时时省略小时部分，格式为 M:SS。
+
+    Args:
+        seconds (float): 以秒为单位的时间长度。
+
+    Returns:
+        str: 格式化后的时间字符串，格式为 H:MM:SS 或 M:SS。
+    """
     h, remainder = divmod(int(seconds), 3600)
     m, s = divmod(remainder, 60)
     if h > 0:
@@ -146,6 +231,20 @@ def format_duration(seconds: float) -> str:
 
 
 def transcode_file(source_file: Path, target_file: Path, encoder: str, force: bool = False):
+    """对单个视频文件执行转码操作。
+
+    检查目标文件是否存在（skipped 逻辑），创建父目录，调用 ffmpeg 进行实际编码。
+    编码过程中会更新全局状态以便 Ctrl+C 时清理不完整文件。
+
+    Args:
+        source_file (Path): 源视频文件路径。
+        target_file (Path): 目标输出文件路径。
+        encoder (str): 编码器名称。
+        force (bool): 是否强制覆盖已存在的目标文件。默认为 False。
+
+    Returns:
+        str: 转码结果，'done' 表示成功，'skipped' 表示已跳过，'failed' 表示失败。
+    """
     global _current_process, _current_target_file
 
     if target_file.exists() and not force:
@@ -180,6 +279,15 @@ def transcode_file(source_file: Path, target_file: Path, encoder: str, force: bo
 
 
 def main():
+    """主函数：批量转码视频文件。
+
+    流程：
+    1. 通过命令行交互获取源目录和目标目录。
+    2. 检测可用的硬件编码器。
+    3. 递归扫描源目录下所有视频文件，统计总时长。
+    4. 逐个文件执行转码，输出进度信息。
+    5. 汇总并打印成功、跳过和失败的文件数量。
+    """
     parser = argparse.ArgumentParser(description='批量转码视频到高度 640，按比例缩放，并自动选择可用编码器。')
     parser.add_argument('--force', action='store_true', help='强制覆盖已有目标文件')
     args = parser.parse_args()
