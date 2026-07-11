@@ -31,8 +31,9 @@
 ```
 tools4trainAI/
 ├── 01.录制鼠标键盘输入/        # 游戏操作数据录制
-│   ├── input_recorder_cross_platform.py   # 键盘/鼠标跨平台记录器
-│   ├── gamepad_recorder_pygame.py         # 手柄（游戏控制器）记录器
+│   ├── unified_input_recorder.py          # [推荐] 统一记录器（键盘+鼠标+手柄）
+│   ├── input_recorder_cross_platform.py   # 键盘/鼠标跨平台记录器（独立版）
+│   ├── gamepad_recorder_pygame.py         # 手柄（游戏控制器）记录器（独立版）
 │   ├── key_waterfall_plot.py              # 键盘/鼠标事件瀑布图可视化
 │   ├── simple_log_reader.py               # 日志读取与分析工具
 │   └── requirements.txt                   # Python 依赖
@@ -66,12 +67,44 @@ tools4trainAI/
 
 | 脚本 | 功能 | 输入 | 输出 |
 |------|------|------|------|
+| `main.py` | **[推荐]** 统一记录器，自动枚举键盘/鼠标/手柄，同时录制所有设备到单一日志文件 | 无（实时监听） | `unified_input_YYYYMMDD_HHMMSS.txt` |
 | `input_recorder_cross_platform.py` | 使用 pynput 跨平台录制键盘和鼠标事件（按键按下/释放、鼠标点击/移动/滚轮） | 无（实时监听） | `input_YYYYMMDD_HHMMSS.txt` |
 | `gamepad_recorder_pygame.py` | 使用 pygame 录制手柄/游戏控制器输入（摇杆、按钮、方向键），支持 Xbox/PS4/PS5 映射 | 无（实时监听） | `gamepad_YYYYMMDD_HHMMSS.txt` |
-| `key_waterfall_plot.py` | 将录制的键盘/鼠标日志绘制为瀑布图，直观显示按键时间区间 | 日志文件路径 | matplotlib 图表 |
-| `simple_log_reader.py` | 简易的日志分析和回放工具 | 命令参数 | 控制台输出统计信息 |
+| `waterfall_plot.py` | 将日志绘制为键盘/鼠标/手柄三幅独立的瀑布图 | 日志文件路径 | 三张 PNG 图片 |
+| `key_waterfall_plot.py` | 旧版瀑布图（仅键盘+鼠标） | 日志文件路径 | matplotlib 图表 |
 
 **依赖**：`pynput>=1.7.6`， `matplotlib>=3.7.0`， `pygame`
+
+---
+
+> **⚠️ 重要警告**
+
+#### 1. 管理员 / root 权限
+
+在 **macOS** 上，输入监听需要授权：
+- 「系统设置 → 隐私与安全性 → 输入监听」中勾选你的终端（Terminal / VSCode）
+- 如果不开启，pynput 可能无法捕获全局键盘事件
+
+在 **Linux** 上，可能需要以 root 运行，或将用户加入 `input` 组：
+```bash
+sudo python main.py
+```
+
+在 **Windows** 上，部分游戏需要以管理员身份运行终端才能捕获输入。
+
+#### 2. 反作弊 / 游戏检测风险
+
+此工具通过全局钩子（pynput / SDL）读取输入事件，**行为特征与按键精灵、宏录制工具类似**。部分带有反作弊系统的游戏（如《原神》《Valorant》《CS2》《PUBG》等）可能会检测到输入钩子并：
+
+- **拒绝启动游戏**
+- **运行时弹出警告**
+- **封禁账号**
+
+**建议：**
+- 仅用于**离线单机游戏**或**明确允许录制**的游戏
+- 不要在带有反作弊系统的竞技游戏中使用
+- 如不确定，先在游戏外运行测试是否被检测
+- 本工具仅作数据采集用途，使用者自行承担风险
 
 ---
 
@@ -179,8 +212,10 @@ pip install opencv-python numpy matplotlib
 ### 典型使用流程
 
 ```bash
-# 1. 录制操作数据（与游戏同时运行）
-python "01.录制鼠标键盘输入/input_recorder_cross_platform.py"
+# 1. 录制操作数据（与游戏同时运行）— 推荐使用统一记录器
+python "01.录制鼠标键盘输入/unified_input_recorder.py"
+#   或分别录制键盘/鼠标和手柄:
+#   python "01.录制鼠标键盘输入/input_recorder_cross_platform.py"
 
 # 2. 将视频与日志匹配
 python "02.匹配视频与日志/main.py" ./logs ./videos ./matched_videos
