@@ -58,6 +58,20 @@ CONTROLLER_MAPPINGS_WINDOWS = {
 }
 
 def get_mapping(joy_name):
+    """根据手柄名称模糊匹配平台对应的按键映射表。
+
+    根据当前操作系统选择对应的映射表（macOS / Windows），
+    然后通过手柄名称关键词（如 'xbox'、'dualsense'）进行模糊匹配。
+
+    Args:
+        joy_name: 手柄的设备名称字符串。
+
+    Returns:
+        dict | None: 匹配到的映射表字典（包含 buttons 和 axes），未匹配返回 None。
+
+    Raises:
+        NotImplementedError: 当前系统为 Linux 时抛出，暂不支持。
+    """
     CONTROLLER_MAPPINGS = None
     if sys.platform == "darwin":
         CONTROLLER_MAPPINGS = CONTROLLER_MAPPINGS_MACOS
@@ -66,7 +80,6 @@ def get_mapping(joy_name):
     else:
         raise NotImplementedError("linux平台手柄捕捉逻辑暂未实现，error")
 
-    """根据名称模糊匹配映射表"""
     for key in CONTROLLER_MAPPINGS:
         if key.lower() in joy_name.lower():
             return CONTROLLER_MAPPINGS[key]
@@ -74,11 +87,21 @@ def get_mapping(joy_name):
 
 
 def now_iso() -> str:
+    """获取当前时间的 ISO 格式字符串。
+
+    Returns:
+        str: 当前时间的 ISO 8601 格式字符串。
+    """
     return datetime.now().isoformat()
 
 
 class GamepadRecorder:
     def __init__(self) -> None:
+        """初始化手柄输入记录器。
+
+        创建以启动时间命名的日志文件，设置摇杆死区、轴变化阈值和采样间隔等参数。
+        初始化手柄实例、映射表和状态存储字典。
+        """
         # 日志配置
         start_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_filename = f"gamepad_{start_str}.txt"
@@ -95,6 +118,11 @@ class GamepadRecorder:
         self.last_hats = {}        # 存储上一次的方向键状态 (按 joy_id 索引)
 
     def _write_line(self, line: str) -> None:
+        """向日志文件追加写入一行内容。
+
+        Args:
+            line: 要写入的日志行字符串（不含换行符）。
+        """
         try:
             with open(self.log_filename, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
@@ -103,6 +131,14 @@ class GamepadRecorder:
             print(f"写入日志失败: {e}")
 
     def _log(self, action: str, detail: str) -> None:
+        """记录一条格式化手柄事件日志（同时输出到控制台和文件）。
+
+        日志格式: [ISO时间] G 动作 详情
+
+        Args:
+            action: 事件类型，如 'BUTTON_DOWN'、'AXIS_MOVE'、'INFO'。
+            detail: 事件详情，如 'id=0 key=A'。
+        """
         line = f"[{now_iso()}] G {action} {detail}"
         print(line)
         self._write_line(line)
@@ -174,6 +210,13 @@ class GamepadRecorder:
         return True
 
     def start(self):
+        """启动手柄输入录制主循环。
+
+        初始化 pygame 环境，检测并初始化所有已连接的手柄，
+        进入事件轮询循环，处理按钮、方向键和摇杆轴事件。
+        支持热插拔检测（设备插入/拔出）。
+        按 Ctrl+C 停止录制。
+        """
         # 初始化 pygame 全局环境
         pygame.init()
         
@@ -260,6 +303,10 @@ class GamepadRecorder:
             self.stop()
 
     def stop(self):
+        """停止手柄输入录制。
+
+        重置运行状态，释放 pygame 的摇杆和全局资源。
+        """
         if not self.running:
             return
         self.running = False

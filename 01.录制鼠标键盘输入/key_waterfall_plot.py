@@ -56,11 +56,29 @@ line_re = re.compile(r"^\[(?P<iso>[^\]]+)\]\s+(?P<dev>[KM])\s+(?P<act>\w+)\s+(?P
 
 
 def parse_time(iso_str: str) -> float:
-    # 返回 POSIX 时间戳（秒，float）  
+    """将 ISO 格式时间字符串解析为 POSIX 时间戳。
+
+    Args:
+        iso_str: ISO 8601 格式的时间字符串。
+
+    Returns:
+        float: POSIX 时间戳（秒）。
+    """
     return datetime.fromisoformat(iso_str).timestamp()
 
 
 def parse_log(filepath: str) -> List[Tuple[float, str, str]]:
+    """解析日志文件，提取键盘和鼠标的按下/释放事件。
+
+    根据正则匹配日志行格式，提取时间戳、动作类型和按键/按钮名称。
+    忽略鼠标移动和滚轮事件。
+
+    Args:
+        filepath: 日志文件的路径。
+
+    Returns:
+        List[Tuple[float, str, str]]: 事件列表，每个元素为 (时间戳, 动作, 名称)。
+    """
     events: List[Tuple[float, str, str]] = []  # (ts, action, name)
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
@@ -95,7 +113,17 @@ def parse_log(filepath: str) -> List[Tuple[float, str, str]]:
 
 
 def build_intervals(events: List[Tuple[float, str, str]]) -> Dict[str, List[Tuple[float, float]]]:
-    # 为每个键构建 (start, end) 区间；若存在未匹配的 PRESS，则用收尾时刻近似闭合
+    """根据事件列表为每个按键构建按下-释放的时间区间。
+
+    对每个按键，匹配 PRESS 和 RELEASE 事件形成 (start, end) 区间。
+    若存在未匹配的 PRESS（未释放），则用最后事件时间近似闭合。
+
+    Args:
+        events: 事件列表，每个元素为 (时间戳, 动作, 名称)。
+
+    Returns:
+        Dict[str, List[Tuple[float, float]]]: 按键名到时间区间列表的映射。
+    """
     by_key_intervals: Dict[str, List[Tuple[float, float]]] = defaultdict(list)
     pressed_at: Dict[str, float] = {}
 
@@ -124,6 +152,15 @@ def build_intervals(events: List[Tuple[float, str, str]]) -> Dict[str, List[Tupl
 
 
 def plot_waterfall(by_key_intervals: Dict[str, List[Tuple[float, float]]], title: str = "Key/Mouse Waterfall") -> None:
+    """绘制按键/鼠标事件的瀑布图。
+
+    横轴为时间（秒），纵轴为按键/按钮名称，每个按键的按下-抬起区间以水平条显示。
+    时间从第一个事件开始归一化。
+
+    Args:
+        by_key_intervals: 按键名到时间区间列表的映射。
+        title: 图表标题，默认为 "Key/Mouse Waterfall"。
+    """
     if not by_key_intervals:
         print("没有可绘制的键盘事件区间")
         return
@@ -170,6 +207,11 @@ def plot_waterfall(by_key_intervals: Dict[str, List[Tuple[float, float]]], title
 
 
 def main() -> None:
+    """主函数：解析命令行参数，读取日志并绘制瀑布图。
+
+    从命令行获取日志文件路径，解析事件，构建时间区间，
+    最后调用 matplotlib 绘制并显示瀑布图。
+    """
     if len(sys.argv) < 2:
         print("用法: python key_waterfall_plot.py <日志文件路径>")
         return

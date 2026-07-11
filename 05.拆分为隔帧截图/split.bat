@@ -1,6 +1,19 @@
 @echo off
 setlocal enabledelayedexpansion
 
+rem ===========================================================================
+rem 视频隔帧截图工具
+rem
+rem 功能：使用 FFmpeg 将指定目录下的所有 MP4 视频文件按每秒 1 帧的频率
+rem       提取截图（JPEG），每部视频的截图存放在独立的文件夹中。
+rem
+rem 输入：input_folder - 源视频文件夹路径（需手动修改）
+rem       output_folder - 截图输出文件夹路径（需手动修改）
+rem 输出：每个视频对应的截图文件夹，内含 frame_0001.jpg, frame_0002.jpg ...
+rem
+rem 依赖：系统需预装 FFmpeg 并添加到 PATH 环境变量
+rem ===========================================================================
+
 :: 设置输入文件夹
 set "input_folder=C:\path\to\videos"
 :: 设置输出文件夹

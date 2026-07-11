@@ -17,6 +17,16 @@ import datetime
 
 class VideoProcessor:
     def __init__(self, source_dir, cache_dir, target_dir):
+        """初始化视频处理器。
+
+        创建目标目录，配置日志系统（同时输出到文件和终端），
+        记录处理配置信息。
+
+        Args:
+            source_dir: 源视频文件所在目录路径。
+            cache_dir: 缓存目录路径（压缩临时存储），为 None 时不使用缓存。
+            target_dir: 目标输出目录路径。
+        """
         self.source_dir = Path(source_dir)
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.target_dir = Path(target_dir)
@@ -49,7 +59,17 @@ class VideoProcessor:
         self.video_extensions = {'.mov', '.mp4', '.mkv', '.avi', '.wmv', '.flv', '.webm'}
     
     def get_video_bitrate(self, video_path):
-        """获取视频码率（单位：Mbps）"""
+        """获取视频文件的码率（单位：Mbps）。
+
+        优先从 ffprobe 返回的视频流信息中直接读取码率，
+        若无直接码率字段，则通过文件大小和时长进行估算。
+
+        Args:
+            video_path: 视频文件的路径。
+
+        Returns:
+            float: 视频码率（Mbps），获取失败时返回 0。
+        """
         try:
             cmd = [
                 'ffprobe',
@@ -109,7 +129,18 @@ class VideoProcessor:
             return 0
     
     def compress_video(self, input_path, output_path):
-        """使用FFmpeg进行x265单遍(1-pass)ABR压缩，目标码率45M，VBV 40-70M。"""
+        """使用 FFmpeg 进行硬件加速视频压缩。
+
+        使用 hevc_nvenc 编码器（NVENC H.265）进行 VBR 压缩，
+        目标码率 45M，最大码率 70M，10bit 色深。
+
+        Args:
+            input_path: 输入视频文件路径。
+            output_path: 输出压缩视频文件路径。
+
+        Returns:
+            tuple[bool, float]: (是否成功, 压缩耗时（秒）)。
+        """
         import time
         start_time = time.time()
         
@@ -167,11 +198,30 @@ class VideoProcessor:
             return False, compression_time
     
     def get_relative_path(self, file_path, base_dir):
-        """获取文件相对于基础目录的路径"""
+        """获取文件相对于基础目录的相对路径。
+
+        Args:
+            file_path: 文件的完整路径。
+            base_dir: 基础目录路径。
+
+        Returns:
+            Path: 相对路径对象。
+        """
         return file_path.relative_to(base_dir)
     
     def process_video(self, video_path):
-        """处理单个视频文件"""
+        """处理单个视频文件：根据码率决定直接复制或压缩。
+
+        如果视频码率不超过 50Mbps，直接复制到目标目录；
+        如果超过 50Mbps，先压缩（可选择使用缓存目录）再移至目标目录。
+        压缩失败时回退为直接复制原文件。
+
+        Args:
+            video_path: 视频文件的完整路径。
+
+        Returns:
+            bool: 处理成功返回 True，失败返回 False。
+        """
         import time
         start_time = time.time()
         
@@ -289,7 +339,14 @@ class VideoProcessor:
             return False
     
     def find_video_files(self, directory):
-        """递归查找所有视频文件"""
+        """递归查找指定目录下所有受支持的视频文件。
+
+        Args:
+            directory: 要搜索的目录路径。
+
+        Returns:
+            list[Path]: 找到的视频文件路径列表。
+        """
         video_files = []
         for root, dirs, files in os.walk(directory):
             for file in files:
@@ -298,7 +355,11 @@ class VideoProcessor:
         return video_files
     
     def process_all_videos(self):
-        """处理所有视频文件"""
+        """批量处理源目录中的所有视频文件。
+
+        扫描源目录，遍历所有视频文件逐个处理，
+        输出处理进度和最终统计信息。
+        """
         self.logger.info(f"开始扫描源目录: {self.source_dir}")
         video_files = self.find_video_files(self.source_dir)
         
@@ -320,6 +381,15 @@ class VideoProcessor:
     
 
 def main():
+    """主函数：交互式视频预处理入口。
+
+    通过命令行交互获取源目录、缓存目录和目标目录路径，
+    创建 VideoProcessor 实例并启动批量处理。
+    支持以下功能：
+    - 码率 <= 50Mbps 的视频直接复制
+    - 码率 > 50Mbps 的视频使用 NVENC H.265 压缩
+    - 可选择使用缓存目录进行中转
+    """
     print("=== 视频预处理工具 ===")
     print()
     

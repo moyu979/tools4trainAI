@@ -33,7 +33,17 @@ LOG_TS_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]")
 
 
 def parse_log_timestamp(line: str) -> datetime | None:
-    """从日志行头部提取时间戳，例如 [2026-05-30T20:22:54.425688]"""
+    """从日志行头部提取 ISO 格式时间戳。
+
+    从形如 "[2026-05-30T20:22:54.425688] M MOVE x=803 y=482" 的行中
+    提取并解析方括号内的时间戳部分。
+
+    Args:
+        line: 日志文件中的一行文本。
+
+    Returns:
+        datetime | None: 解析成功返回 datetime 对象，失败返回 None。
+    """
     m = LOG_TS_RE.match(line)
     if m:
         try:
@@ -44,9 +54,17 @@ def parse_log_timestamp(line: str) -> datetime | None:
 
 
 def collect_log_ranges(log_dir: Path) -> list[tuple[datetime, datetime]]:
-    """
-    扫描所有 .txt 文件，每个文件提取一个 [最早时间, 最晚时间] 区间。
-    返回区间列表，按起始时间排序。
+    """扫描日志目录，收集每个日志文件的时间区间。
+
+    遍历指定目录下所有 .txt 文件，解析每行的时间戳，
+    提取每个文件中最早和最晚的时间戳作为该文件的记录区间。
+
+    Args:
+        log_dir: 包含日志 .txt 文件的目录路径。
+
+    Returns:
+        list[tuple[datetime, datetime]]: 时间区间列表，每个元素为 (起始时间, 结束时间)，
+        按起始时间升序排列。
     """
     ranges: list[tuple[datetime, datetime]] = []
 
@@ -95,7 +113,17 @@ VIDEO_FNAME_RE = re.compile(
 
 
 def parse_video_start_time(filename: str) -> datetime | None:
-    """从视频文件名解析录制开始时间"""
+    """从视频文件名解析录制开始时间。
+
+    支持文件名格式如 "Yuan Shen 原神 2026.05.28 - 22.09.59.03.mp4"，
+    从文件名中提取日期、时间和厘秒信息。
+
+    Args:
+        filename: 视频文件名（不含路径）。
+
+    Returns:
+        datetime | None: 解析成功返回视频开始时间的 datetime 对象，失败返回 None。
+    """
     m = VIDEO_FNAME_RE.match(filename)
     if not m:
         return None
@@ -113,7 +141,16 @@ def parse_video_start_time(filename: str) -> datetime | None:
 # ---------------------------------------------------------------------------
 
 def get_video_duration(video_path: Path) -> float | None:
-    """用 ffprobe 获取视频时长（秒），失败返回 None"""
+    """通过 ffprobe 获取视频文件的时长。
+
+    使用 ffprobe 命令解析视频文件格式信息，提取时长字段。
+
+    Args:
+        video_path: 视频文件的完整路径。
+
+    Returns:
+        float | None: 视频时长（秒），获取失败时返回 None。
+    """
     try:
         cmd = [
             "ffprobe", "-v", "quiet",
@@ -140,6 +177,15 @@ DEFAULT_MAX_VIDEO_HOURS = 2  # 无法获取时长时的保守假设
 
 
 def main() -> None:
+    """主函数：将视频文件与日志文件进行时间匹配。
+
+    流程：
+    1. 从命令行参数获取日志目录、视频目录和结果目录。
+    2. 扫描所有日志文件，提取每个文件的时间区间。
+    3. 遍历所有视频文件，解析文件名中的开始时间并用 ffprobe 获取时长。
+    4. 判断视频时段是否与任意日志区间有重叠，有则复制到结果目录。
+    5. 输出匹配统计信息。
+    """
     if len(sys.argv) != 4:
         print("用法: python main.py <log_dir> <video_dir> <result_dir>")
         print("示例: python main.py ./log ./video ./result")
