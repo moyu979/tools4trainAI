@@ -3,8 +3,13 @@
 """
 视频预处理脚本
 功能：根据码率对视频文件进行分类处理
-- 码率 <= 50M：直接移动到目标文件夹
-- 码率 > 50M：先压缩到缓存文件夹，再移动到目标文件夹
+- 码率 <= BITRATE_THRESHOLD_Mbps（默认 50M）：直接移动到目标文件夹
+- 码率 > BITRATE_THRESHOLD_Mbps（默认 50M）：先压缩再移动到目标文件夹
+
+配置说明：
+所有可调参数均以类常量形式定义在 VideoProcessor 中，
+包括码率阈值、NVENC 压缩参数（目标码率、最大码率、缓冲区大小等），
+修改配置时无需深入业务逻辑代码。
 """
 
 import os
@@ -16,6 +21,34 @@ import logging
 import datetime
 
 class VideoProcessor:
+    # ============================================================
+    # 码率阈值（Mbps）- 超过此值需要压缩
+    # ============================================================
+    BITRATE_THRESHOLD_Mbps = 50
+    
+    # ============================================================
+    # NVENC H.265 压缩参数（C++ 宏风格常量）
+    # ============================================================
+    NVENC_TARGET_BITRATE  = '45M'    # 目标码率
+    NVENC_MAX_BITRATE     = '70M'    # 最大码率
+    NVENC_BUFFER_SIZE     = '450M'   # VBV 缓冲区大小
+    NVENC_CQ              = '15'     # 恒定质量值（越低质量越好）
+    NVENC_PRESET          = 'p7'     # 编码预设（p1 最快 ~ p7 最佳画质）
+    NVENC_PROFILE         = 'main10' # H.265 编码配置文件（10bit 色深）
+    NVENC_PIX_FMT         = 'p010le' # 像素格式（10bit 4:2:0）
+    NVENC_RC              = 'vbr_hq' # 码率控制模式（高质量 VBR）
+    
+    # ============================================================
+    # 单位转换系数
+    # ============================================================
+    BYTES_TO_MBIT = 1000000       # 字节 → Mbps（1 Mbps = 1,000,000 bps）
+    BYTES_TO_MB   = 1024 * 1024  # 字节 → MB
+    
+    # ============================================================
+    # 支持的视频文件扩展名
+    # ============================================================
+    VIDEO_EXTENSIONS = {'.mov', '.mp4', '.mkv', '.avi', '.wmv', '.flv', '.webm'}
+    
     def __init__(self, source_dir, cache_dir, target_dir):
         """初始化视频处理器。
 
@@ -55,8 +88,8 @@ class VideoProcessor:
         self.logger.info(f"目标目录: {self.target_dir}")
         self.logger.info("=" * 60)
         
-        # 支持的视频格式
-        self.video_extensions = {'.mov', '.mp4', '.mkv', '.avi', '.wmv', '.flv', '.webm'}
+        # 支持的视频格式（引用类常量）
+        self.video_extensions = self.VIDEO_EXTENSIONS
     
     def get_video_bitrate(self, video_path):
         """获取视频文件的码率（单位：Mbps）。
@@ -105,8 +138,8 @@ class VideoProcessor:
             # 获取码率
             bitrate = video_stream.get('bit_rate')
             if bitrate:
-                # 转换为 Mbps
-                bitrate_mbps = int(bitrate) / 1000000
+                # 转换为 Mbps（使用类常量）
+                bitrate_mbps = int(bitrate) / self.BYTES_TO_MBIT
                 return bitrate_mbps
             
             # 如果没有直接码率信息，尝试从文件大小和时长估算
@@ -115,8 +148,8 @@ class VideoProcessor:
             file_size = int(format_info.get('size', 0))
             
             if duration > 0 and file_size > 0:
-                # 估算码率 (文件大小 * 8 / 时长 / 1000000)
-                estimated_bitrate = (file_size * 8) / (duration * 1000000)
+                # 估算码率 (文件大小 * 8 / 时长 / BYTES_TO_MBIT)
+                estimated_bitrate = (file_size * 8) / (duration * self.BYTES_TO_MBIT)
                 return estimated_bitrate
             
             return 0
@@ -132,7 +165,12 @@ class VideoProcessor:
         """使用 FFmpeg 进行硬件加速视频压缩。
 
         使用 hevc_nvenc 编码器（NVENC H.265）进行 VBR 压缩，
-        目标码率 45M，最大码率 70M，10bit 色深。
+        压缩参数由类常量控制（参见 NVENC_* 系列常量）：
+        - 目标码率: NVENC_TARGET_BITRATE（默认 45M）
+        - 最大码率: NVENC_MAX_BITRATE（默认 70M）
+        - 缓冲区大小: NVENC_BUFFER_SIZE（默认 450M）
+        - 编码预设: NVENC_PRESET（默认 p7）
+        - 配置文件: NVENC_PROFILE（默认 main10, 10bit 色深）
 
         Args:
             input_path: 输入视频文件路径。
@@ -167,14 +205,14 @@ class VideoProcessor:
                 '-y',
                 '-i', str(input_path),
                 '-c:v', 'hevc_nvenc',
-                '-rc', 'vbr_hq',
-                '-cq', '15',
-                '-b:v', '45M',
-                '-maxrate', '70M',
-                '-bufsize', '450M',
-                '-preset', 'p7',
-                '-profile:v', 'main10',
-                '-pix_fmt', 'p010le',
+                '-rc', self.NVENC_RC,
+                '-cq', self.NVENC_CQ,
+                '-b:v', self.NVENC_TARGET_BITRATE,
+                '-maxrate', self.NVENC_MAX_BITRATE,
+                '-bufsize', self.NVENC_BUFFER_SIZE,
+                '-preset', self.NVENC_PRESET,
+                '-profile:v', self.NVENC_PROFILE,
+                '-pix_fmt', self.NVENC_PIX_FMT,
                 '-c:a', 'copy',
                 str(output_path)
             ]
@@ -212,8 +250,8 @@ class VideoProcessor:
     def process_video(self, video_path):
         """处理单个视频文件：根据码率决定直接复制或压缩。
 
-        如果视频码率不超过 50Mbps，直接复制到目标目录；
-        如果超过 50Mbps，先压缩（可选择使用缓存目录）再移至目标目录。
+        如果视频码率不超过 BITRATE_THRESHOLD_Mbps（默认 50Mbps），直接复制到目标目录；
+        如果超过 BITRATE_THRESHOLD_Mbps，先压缩（可选择使用缓存目录）再移至目标目录。
         压缩失败时回退为直接复制原文件。
 
         Args:
@@ -235,16 +273,16 @@ class VideoProcessor:
             
             # 检查码率
             original_bitrate = self.get_video_bitrate(video_path)
-            file_size_mb = video_path.stat().st_size / (1024 * 1024)
+            file_size_mb = video_path.stat().st_size / self.BYTES_TO_MB
             
             self.logger.info(f"处理文件: {video_path.name}")
             self.logger.info(f"  原始码率: {original_bitrate:.2f} Mbps")
             self.logger.info(f"  文件大小: {file_size_mb:.2f} MB")
             self.logger.info(f"  相对路径: {rel_path}")
             
-            if original_bitrate <= 50:
-                # 码率不超过50M，直接复制
-                self.logger.info(f"  操作: 直接复制 (码率未超过50M)")
+            if original_bitrate <= self.BITRATE_THRESHOLD_Mbps:
+                # 码率不超过阈值，直接复制
+                self.logger.info(f"  操作: 直接复制 (码率未超过{self.BITRATE_THRESHOLD_Mbps}M)")
                 shutil.copy2(str(video_path), str(target_path))
                 
                 end_time = time.time()
@@ -256,8 +294,8 @@ class VideoProcessor:
                 self.logger.info("-" * 50)
                 
             else:
-                # 码率超过50M，需要压缩
-                self.logger.info(f"  操作: 需要压缩 (码率超过50M)")
+                # 码率超过阈值，需要压缩
+                self.logger.info(f"  操作: 需要压缩 (码率超过{self.BITRATE_THRESHOLD_Mbps}M)")
                 
                 # 检查是否使用缓存目录
                 if self.cache_dir is None or not self.cache_dir.exists():
@@ -386,8 +424,8 @@ def main():
     通过命令行交互获取源目录、缓存目录和目标目录路径，
     创建 VideoProcessor 实例并启动批量处理。
     支持以下功能：
-    - 码率 <= 50Mbps 的视频直接复制
-    - 码率 > 50Mbps 的视频使用 NVENC H.265 压缩
+    - 码率不超过 BITRATE_THRESHOLD_Mbps（默认 50Mbps）的视频直接复制
+    - 码率超过 BITRATE_THRESHOLD_Mbps 的视频使用 NVENC H.265 压缩
     - 可选择使用缓存目录进行中转
     """
     print("=== 视频预处理工具 ===")
