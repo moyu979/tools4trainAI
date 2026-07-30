@@ -11,6 +11,7 @@ import argparse
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # 全局状态，用于 Ctrl+C 时终止当前编码并清理不完整文件
@@ -230,16 +231,18 @@ def format_duration(seconds: float) -> str:
         return f'{m}:{s:02d}'
 
 
-def transcode_file(source_file: Path, target_file: Path, encoder: str, force: bool = False):
+def transcode_file(source_file: Path, target_file: Path, encoder: str, source_duration: float = 0.0, force: bool = False):
     """对单个视频文件执行转码操作。
 
     检查目标文件是否存在（skipped 逻辑），创建父目录，调用 ffmpeg 进行实际编码。
     编码过程中会更新全局状态以便 Ctrl+C 时清理不完整文件。
+    编码完成后输出编码速度比（编码用时 / 原视频时长）。
 
     Args:
         source_file (Path): 源视频文件路径。
         target_file (Path): 目标输出文件路径。
         encoder (str): 编码器名称。
+        source_duration (float): 源视频时长（秒），用于计算编码速度比。
         force (bool): 是否强制覆盖已存在的目标文件。默认为 False。
 
     Returns:
@@ -248,7 +251,8 @@ def transcode_file(source_file: Path, target_file: Path, encoder: str, force: bo
     global _current_process, _current_target_file
 
     if target_file.exists() and not force:
-        print(f'跳过：目标已存在 {target_file}')
+        src_dur_str = format_duration(source_duration) if source_duration > 0 else '?'
+        print(f'跳过：目标已存在 {target_file}（原视频时长 {src_dur_str}）')
         return 'skipped'
 
     target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -262,15 +266,24 @@ def transcode_file(source_file: Path, target_file: Path, encoder: str, force: bo
     # 记录当前目标文件，以便 Ctrl+C 时清理
     _current_target_file = target_file
 
+    start_time = time.time()
     try:
         _current_process = subprocess.Popen(cmd)
         _current_process.wait()
+        elapsed = time.time() - start_time
         if _current_process.returncode != 0:
             print(f'错误: 编码失败 {source_file}，ffmpeg 返回码 {_current_process.returncode}')
             return 'failed'
-        print(f'完成: {target_file}')
+
+        # 输出编码速度比
+        if source_duration > 0:
+            ratio = elapsed / source_duration
+            print(f'完成: {target_file}（编码用时 {format_duration(elapsed)}，速度比 {ratio:.2f}x）')
+        else:
+            print(f'完成: {target_file}（编码用时 {format_duration(elapsed)}）')
         return 'done'
     except Exception as exc:
+        elapsed = time.time() - start_time
         print(f'错误: 编码过程中出现异常 {source_file}，{exc}')
         return 'failed'
     finally:
@@ -335,7 +348,7 @@ def main():
 
     for source_file in sorted(video_files):
         target_file = build_output_path(source_root, target_root, source_file)
-        result = transcode_file(source_file, target_file, encoder, force=args.force)
+        result = transcode_file(source_file, target_file, encoder, source_duration=file_durations.get(source_file, 0.0), force=args.force)
         if result == 'done':
             success += 1
             completed_duration += file_durations.get(source_file, 0)

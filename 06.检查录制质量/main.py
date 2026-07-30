@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-检查视频中的重复帧（与前一帧内容一致的帧）。
+Detect duplicate frames in a video (frames identical to the previous frame).
 
-功能：
-    1. 使用 OpenCV 解码视频的每一帧
-    2. 比较每一帧与上一帧（支持 exact 精确匹配 / MSE / 直方图 / SSIM 四种方法）
-    3. 输出重复帧的时间点列表和总体比例
-    4. 生成统计图：横轴为帧序号，纵轴为与上一帧的相似度
+Features:
+    1. Decode each frame using OpenCV
+    2. Compare each frame against the previous one (supports exact/MSE/histogram/SSIM)
+    3. Print a list of duplicate timestamps and the overall ratio
+    4. Generate a chart: x-axis = timestamp (MM:SS.mmm), y-axis = similarity to previous frame
 
-用法：
+Usage (CLI mode):
     python main.py <video.mp4>
-    python main.py <video.mp4> --method exact       # 默认：像素级完全一致
+    python main.py <video.mp4> --method exact
     python main.py <video.mp4> --threshold 0.99 --method ssim --output chart.png
+
+Usage (interactive mode):
+    python main.py                          # auto-detect interactive mode
+    python main.py --interactive            # force interactive mode
+    python main.py -i                       # same as above
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ import cv2
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# 可选依赖：scikit-image（用于 SSIM）
+# Optional dependency: scikit-image (for SSIM)
 # ---------------------------------------------------------------------------
 try:
     from skimage.metrics import structural_similarity as ssim_ski
@@ -37,27 +42,28 @@ except ImportError:
     HAS_SKIMAGE = False
 
 # ---------------------------------------------------------------------------
-# matplotlib（用于绘图），使用非交互式后端避免 GUI 阻塞
+# matplotlib (for plotting), use non-interactive backend to avoid GUI blocking
 # ---------------------------------------------------------------------------
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 # ---------------------------------------------------------------------------
-# 相似度计算函数
+# Similarity computation functions
 # ---------------------------------------------------------------------------
 
 
 def similarity_exact(frame1: np.ndarray, frame2: np.ndarray) -> float:
-    """像素级精确比较：判断两帧图像是否完全一致。
+    """Exact pixel-level comparison: check if two frames are identical.
 
     Args:
-        frame1: 第一帧图像（numpy 数组）。
-        frame2: 第二帧图像（numpy 数组）。
+        frame1: First frame (numpy array).
+        frame2: Second frame (numpy array).
 
     Returns:
-        float: 两帧完全一致返回 1.0，否则返回 0.0。
+        float: 1.0 if identical, 0.0 otherwise.
     """
     if frame1.shape != frame2.shape:
         return 0.0
@@ -65,37 +71,37 @@ def similarity_exact(frame1: np.ndarray, frame2: np.ndarray) -> float:
 
 
 def similarity_mse(frame1: np.ndarray, frame2: np.ndarray) -> float:
-    """基于均方误差 (MSE) 计算两帧图像的相似度。
+    """Compute similarity based on Mean Squared Error (MSE).
 
-    将 MSE 映射到 [0, 1] 区间：MSE=0 时返回 1.0，MSE 越大返回值趋近于 0。
+    Maps MSE to [0, 1]: MSE=0 returns 1.0, larger MSE approaches 0.
 
     Args:
-        frame1: 第一帧图像（numpy 数组）。
-        frame2: 第二帧图像（numpy 数组）。
+        frame1: First frame (numpy array).
+        frame2: Second frame (numpy array).
 
     Returns:
-        float: 相似度值，值域 [0, 1]，越大表示越相似。
+        float: Similarity value in [0, 1], higher means more similar.
     """
     if frame1.shape != frame2.shape:
         return 0.0
     diff = frame1.astype(np.float32) - frame2.astype(np.float32)
     mse = np.mean(diff ** 2)
-    # 将 MSE 映射到 [0, 1]：MSE=0 → 1.0，MSE 越大 → 趋近 0
+    # Map MSE to [0, 1]: MSE=0 → 1.0, larger MSE → approaches 0
     return float(1.0 / (1.0 + mse / 1000.0))
 
 
 def similarity_hist(frame1: np.ndarray, frame2: np.ndarray) -> float:
-    """基于 HSV 颜色直方图相关性计算两帧图像的相似度。
+    """Compute similarity based on HSV histogram correlation.
 
-    将图像转换到 HSV 色彩空间，计算 2D 直方图（色相 50 级，饱和度 60 级），
-    使用相关性比较方法得到 [0, 1] 区间的相似度值。
+    Convert frames to HSV color space, compute 2D histograms
+    (hue: 50 bins, saturation: 60 bins), and compare using correlation.
 
     Args:
-        frame1: 第一帧图像（BGR 格式的 numpy 数组）。
-        frame2: 第二帧图像（BGR 格式的 numpy 数组）。
+        frame1: First frame (BGR numpy array).
+        frame2: Second frame (BGR numpy array).
 
     Returns:
-        float: 相似度值，值域 [0, 1]，越大表示越相似。
+        float: Similarity value in [0, 1], higher means more similar.
     """
     hsv1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2HSV)
     hsv2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2HSV)
@@ -108,17 +114,18 @@ def similarity_hist(frame1: np.ndarray, frame2: np.ndarray) -> float:
 
 
 def similarity_ssim(frame1: np.ndarray, frame2: np.ndarray) -> float:
-    """基于结构相似性 (SSIM) 计算两帧图像的相似度。
+    """Compute Structural Similarity Index (SSIM) between two frames.
 
-    优先使用 scikit-image 的 SSIM 实现，若未安装则使用简化版 SSIM 算法。
-    将图像转为灰度图后计算亮度、对比度和结构三个分量的乘积。
+    Uses scikit-image's SSIM if available, otherwise falls back to a
+    simplified SSIM implementation. Converts frames to grayscale and
+    computes the product of luminance, contrast, and structure components.
 
     Args:
-        frame1: 第一帧图像（BGR 格式的 numpy 数组）。
-        frame2: 第二帧图像（BGR 格式的 numpy 数组）。
+        frame1: First frame (BGR numpy array).
+        frame2: Second frame (BGR numpy array).
 
     Returns:
-        float: SSIM 相似度值，值域 [0, 1]，越大表示越相似。
+        float: SSIM value in [0, 1], higher means more similar.
     """
     gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
     gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
@@ -126,8 +133,8 @@ def similarity_ssim(frame1: np.ndarray, frame2: np.ndarray) -> float:
     if HAS_SKIMAGE:
         return float(max(0.0, ssim_ski(gray1, gray2)))
 
-    # ----- 简化版 SSIM（不依赖 skimage）-----
-    # 常数
+    # ----- Simplified SSIM (no skimage dependency) -----
+    # Constants
     C1, C2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
 
     mu1 = gray1.mean()
@@ -144,119 +151,253 @@ def similarity_ssim(frame1: np.ndarray, frame2: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
-# 方法注册表
+# Method registry
 # ---------------------------------------------------------------------------
 
 METHODS: dict[str, tuple] = {
-    "exact": (similarity_exact, "精确匹配（像素级完全一致）"),
-    "mse": (similarity_mse, "MSE（均方误差）"),
-    "hist": (similarity_hist, "直方图相关性"),
-    "ssim": (similarity_ssim, "SSIM（结构相似性）"),
+    "exact": (similarity_exact, "Exact match (pixel-level identical)"),
+    "mse": (similarity_mse, "MSE (Mean Squared Error)"),
+    "hist": (similarity_hist, "Histogram correlation"),
+    "ssim": (similarity_ssim, "SSIM (Structural Similarity)"),
 }
 
 
 # ---------------------------------------------------------------------------
-# 命令行参数
+# Solid-color detection
+# ---------------------------------------------------------------------------
+
+
+def _is_solid_color(frame: np.ndarray, std_threshold: float = 5.0) -> bool:
+    """Check if a frame is essentially a solid (pure) color.
+
+    Computes the standard deviation of pixel intensities across all channels.
+    A very low std deviation indicates the frame is mostly a single color
+    (e.g. black / white transition frames between scenes).
+
+    Args:
+        frame: BGR frame (numpy array).
+        std_threshold: Maximum allowed standard deviation to be considered
+                       solid color. Default 5.0 (on 0-255 scale).
+
+    Returns:
+        bool: True if the frame is a solid color.
+    """
+    return float(np.std(frame)) < std_threshold
+
+
+# ---------------------------------------------------------------------------
+# Command-line arguments
 # ---------------------------------------------------------------------------
 
 
 def parse_args() -> argparse.Namespace:
-    """解析命令行参数。
+    """Parse command-line arguments.
 
-    支持的参数:
-    - input: 输入视频文件路径（必填）
-    - --threshold: 重复帧判定阈值（默认 1.0）
-    - --method: 相似度计算方法（exact/mse/hist/ssim）
-    - --output: 统计图保存路径
-    - --json: 详细结果 JSON 保存路径
-    - --every-n: 采样间隔帧数
-    - --no-display: 不显示统计图窗口
+    Supported arguments:
+    - input: Input video file path (optional, omit for interactive mode)
+    - -i, --interactive: Force interactive input mode
+    - --threshold: Duplicate detection threshold (default 1.0)
+    - --method: Similarity method (exact/mse/hist/ssim)
+    - --output: Chart save path
+    - --json: Detailed JSON results save path
+    - --every-n: Sample interval in frames
+    - --no-display: Do not show chart window
+    - --ignore-solid / --no-ignore-solid: Ignore solid-color frames
 
     Returns:
-        argparse.Namespace: 解析后的命令行参数对象。
+        argparse.Namespace: Parsed command-line arguments.
     """
     parser = argparse.ArgumentParser(
-        description="检查视频中的重复帧（与前一帧内容一致的帧）"
+        description="Detect duplicate frames in a video"
     )
-    parser.add_argument("input", type=str, help="输入的 MP4 视频文件路径")
+    parser.add_argument(
+        "input", type=str, nargs="?", default=None,
+        help="Input video file path (omit to enter interactive mode)",
+    )
+    parser.add_argument(
+        "-i", "--interactive",
+        action="store_true",
+        help="Force interactive input mode",
+    )
     parser.add_argument(
         "--threshold",
         type=float,
         default=1.0,
-        help="判定为重复帧的相似度阈值，默认 1.0（exact 模式下仅当像素完全一致时判为重复）",
+        help="Similarity threshold for duplicate detection, default 1.0 (exact mode only counts pixel-identical frames)",
     )
     parser.add_argument(
         "--method",
         type=str,
         default="exact",
         choices=list(METHODS),
-        help="相似度计算方法，默认 exact（像素级精确匹配）",
+        help="Similarity method, default exact (pixel-level exact match)",
     )
     parser.add_argument(
         "--output",
         type=str,
         default=None,
-        help="统计图保存路径（不指定则自动生成在输入文件同目录）",
+        help="Chart save path (default: auto-generate beside input file)",
     )
     parser.add_argument(
         "--json",
         type=str,
         default=None,
-        help="详细结果 JSON 保存路径（不指定则不输出）",
+        help="Detailed JSON results save path (omit to skip)",
     )
     parser.add_argument(
         "--every-n",
         type=int,
         default=1,
-        help="每 N 帧采样一次（>1 可加速处理大文件），默认 1",
+        help="Sample every N frames (>1 speeds up large files), default 1",
     )
     parser.add_argument(
         "--no-display",
         action="store_true",
-        help="不显示统计图窗口（仅保存文件）",
+        help="Do not show the chart window (save only)",
+    )
+    parser.add_argument(
+        "--ignore-solid",
+        action="store_true",
+        default=True,
+        help="Ignore solid-color frames (e.g. black transitions), default true",
+    )
+    parser.add_argument(
+        "--no-ignore-solid",
+        action="store_false",
+        dest="ignore_solid",
+        help="Do not ignore solid-color frames",
     )
     return parser.parse_args()
 
 
 # ---------------------------------------------------------------------------
-# 主流程
+# Interactive input
+# ---------------------------------------------------------------------------
+
+
+def _interactive_prompt() -> argparse.Namespace:
+    """Prompt the user to manually enter parameters interactively.
+
+    Walks through each parameter step by step, with input validation.
+    JSON is auto-saved beside the video file.
+
+    Returns:
+        argparse.Namespace: Namespace with all fields populated.
+    """
+    print("=== Interactive Mode ===")
+
+    # 1. Video file path
+    while True:
+        raw = input("Video file path: ").strip()
+        p = Path(raw)
+        if p.is_file():
+            input_path = str(p)
+            break
+        print(f"File not found: {raw}")
+
+    # 2. Similarity method
+    print("\nAvailable methods:")
+    for k, (_, desc) in METHODS.items():
+        print(f"  {k}: {desc}")
+    while True:
+        raw = input("Method [exact]: ").strip() or "exact"
+        if raw in METHODS:
+            method = raw
+            break
+        print(f"Invalid method: {raw}")
+
+    # 3. Threshold
+    while True:
+        raw = input("Threshold (0~1) [1.0]: ").strip() or "1.0"
+        try:
+            threshold = float(raw)
+            if 0.0 <= threshold <= 1.0:
+                break
+        except ValueError:
+            pass
+        print("Invalid threshold, must be a float between 0 and 1")
+
+    # 4. Every-N
+    while True:
+        raw = input("Sample every N frames [1]: ").strip() or "1"
+        try:
+            every_n = int(raw)
+            if every_n >= 1:
+                break
+        except ValueError:
+            pass
+        print("Invalid value, must be an integer >= 1")
+
+    # 5. Output chart path
+    raw = input("Chart save path (empty = auto): ").strip()
+    output = raw if raw else None
+
+    # 6. JSON path (auto)
+    json_path = str(Path(input_path).with_suffix(".json"))
+
+    # 7. Ignore solid color
+    raw = input("Ignore solid-color frames (Y/n): ").strip().lower()
+    ignore_solid = raw != "n"
+
+    # 8. Display chart
+    raw = input("Show chart window (y/N): ").strip().lower()
+    no_display = raw != "y"
+
+    return argparse.Namespace(
+        input=input_path,
+        interactive=False,
+        threshold=threshold,
+        method=method,
+        output=output,
+        json=json_path,
+        every_n=every_n,
+        no_display=no_display,
+        ignore_solid=ignore_solid,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main flow
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
     args = parse_args()
+    if args.interactive or (args.input is None and sys.stdin.isatty()):
+        args = _interactive_prompt()
+        args.interactive = False
 
     input_path = Path(args.input)
     if not input_path.is_file():
-        print(f"错误：文件不存在 -> {input_path}")
+        print(f"Error: file not found -> {input_path}")
         sys.exit(1)
 
     threshold = args.threshold
     every_n = max(1, args.every_n)
     sim_fn, sim_name = METHODS[args.method]
 
-    # ---- 打开视频 ----
+    # ---- Open video ----
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
-        print("错误：无法打开视频文件（请确认已安装 ffmpeg / OpenCV 编解码器）")
+        print("Error: cannot open video file (make sure ffmpeg / OpenCV codecs are installed)")
         sys.exit(1)
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     duration = total_frames / fps if fps > 0 else 0.0
 
-    print(f"文件      : {input_path.name}")
-    print(f"方法      : {sim_name}")
-    print(f"阈值      : {threshold}")
-    print(f"采样间隔  : 每 {every_n} 帧")
-    print(f"总帧数    : {total_frames}")
-    print(f"帧率      : {fps:.2f} fps")
-    print(f"时长      : {duration:.2f} 秒")
+    print(f"File       : {input_path.name}")
+    print(f"Method     : {sim_name}")
+    print(f"Threshold  : {threshold}")
+    print(f"Every-N    : {every_n}")
+    print(f"Total frames: {total_frames}")
+    print(f"FPS        : {fps:.2f} fps")
+    print(f"Duration   : {duration:.2f} s")
     print("-" * 50)
 
-    # ---- 逐帧处理 ----
-    similarities: list[float] = []       # 每帧与上一帧的相似度
-    duplicate_frames: list[dict] = []     # 重复帧详情
+    # ---- Frame-by-frame processing ----
+    similarities: list[float] = []       # similarity to previous frame
+    duplicate_frames: list[dict] = []     # duplicate frame details
     prev_frame: np.ndarray | None = None
     frame_idx = 0
     duplicate_count = 0
@@ -270,7 +411,8 @@ def main() -> None:
         analyze = frame_idx % every_n == 0
 
         if analyze:
-            if prev_frame is not None:
+            is_solid = args.ignore_solid and _is_solid_color(frame)
+            if prev_frame is not None and not is_solid:
                 sim = sim_fn(prev_frame, frame)
                 similarities.append(sim)
                 if sim >= threshold:
@@ -282,53 +424,55 @@ def main() -> None:
                         "timestamp_str": _fmt_time(ts),
                         "similarity": round(sim, 6),
                     })
+                prev_frame = frame
+            elif is_solid:
+                # Solid-color frame: skip duplicate detection, keep prev_frame unchanged
+                pass
             else:
-                # 第一帧：没有前一帧，相似度记为 1.0
-                similarities.append(1.0)
-
-            prev_frame = frame
+            # First frame: no previous frame, mark as 0.0 (not a duplicate)
+            similarities.append(0.0)
 
         frame_idx += 1
 
-        # 进度提示
+        # Progress indicator
         pct = int(frame_idx / total_frames * 100) if total_frames else 100
         if pct >= last_progress + 10:
             last_progress = pct
-            print(f"处理中 … {pct}% ({frame_idx}/{total_frames})")
+            print(f"Processing … {pct}% ({frame_idx}/{total_frames})")
 
     cap.release()
-    print(f"处理完成… 100% ({frame_idx}/{total_frames})")
+    print(f"Done … 100% ({frame_idx}/{total_frames})")
     print("-" * 50)
 
-    # ---- 统计结果 ----
+    # ---- Results ----
     analyzed = len(similarities)
     dup_ratio = duplicate_count / analyzed if analyzed > 0 else 0.0
 
-    print(f"\n=== 分析结果 ===")
-    print(f"  分析的帧数      : {analyzed}")
-    print(f"  重复帧数        : {duplicate_count}")
-    print(f"  重复帧比例      : {dup_ratio:.4%}")
+    print(f"\n=== Results ===")
+    print(f"  Frames analyzed  : {analyzed}")
+    print(f"  Duplicate frames : {duplicate_count}")
+    print(f"  Duplicate ratio  : {dup_ratio:.4%}")
 
     if duplicate_frames:
-        print(f"\n重复帧列表（前 30 条）：")
-        print(f"  {'帧序号':>8}  {'时间戳':>12}  {'相似度':>8}")
+        print(f"\nDuplicate frames (first 30):")
+        print(f"  {'Frame':>8}  {'Timestamp':>12}  {'Similarity':>8}")
         print(f"  {'-'*8}  {'-'*12}  {'-'*8}")
         for df in duplicate_frames[:30]:
             print(f"  {df['frame_index']:>8}  {df['timestamp_str']:>12}  {df['similarity']:>8.4f}")
         if len(duplicate_frames) > 30:
-            print(f"  … 共 {len(duplicate_frames)} 条重复帧记录（仅显示前 30 条）")
+            print(f"  … {len(duplicate_frames)} duplicate frames total (showing first 30)")
 
-        # 重复帧时间段合并
+        # Merge duplicate frame ranges
         merged = _merge_duplicate_ranges(duplicate_frames, fps)
-        print(f"\n重复帧连续段（合并后）：")
+        print(f"\nMerged duplicate ranges:")
         for seg in merged:
             print(
                 f"  {seg['start_frame']:>8} – {seg['end_frame']:<8}  "
                 f"[{seg['start_time']} – {seg['end_time']}]  "
-                f"共 {seg['count']} 帧"
+                f"{seg['count']} frames"
             )
 
-    # ---- 输出 JSON ----
+    # ---- JSON output ----
     if args.json:
         result = {
             "file": str(input_path),
@@ -341,16 +485,16 @@ def main() -> None:
             "threshold": threshold,
             "method": args.method,
             "every_n": every_n,
-            "duplicate_frames": duplicate_frames[:500],  # 防止 JSON 过大
+            "duplicate_frames": duplicate_frames[:500],  # prevent oversized JSON
         }
         json_path = Path(args.json)
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        print(f"\nJSON 已保存 → {json_path}")
+        print(f"\nJSON saved → {json_path}")
 
-    # ---- 绘制统计图 ----
+    # ---- Plot chart ----
     _plot_chart(
         similarities=similarities,
         every_n=every_n,
@@ -359,24 +503,25 @@ def main() -> None:
         dup_ratio=dup_ratio,
         output_path=args.output or (input_path.with_suffix(".png")),
         no_display=args.no_display,
+        fps=fps,
     )
 
 
 # ---------------------------------------------------------------------------
-# 辅助函数
+# Helper functions
 # ---------------------------------------------------------------------------
 
 
 def _fmt_time(seconds: float) -> str:
-    """将秒数格式化为可读的时间字符串。
+    """Format seconds into a readable time string.
 
-    格式为 MM:SS.mmm，例如 "05:23.456"。
+    Format is MM:SS.mmm, e.g. "05:23.456".
 
     Args:
-        seconds: 以秒为单位的时间长度。
+        seconds: Time in seconds.
 
     Returns:
-        str: 格式化的时间字符串。
+        str: Formatted time string.
     """
     m = int(seconds // 60)
     s = seconds % 60
@@ -386,17 +531,19 @@ def _fmt_time(seconds: float) -> str:
 def _merge_duplicate_ranges(
     dup_frames: list[dict], fps: float
 ) -> list[dict]:
-    """将连续的重复帧合并为连续时间段。
+    """Merge consecutive duplicate frames into contiguous ranges.
 
-    遍历重复帧列表，将帧序号连续的合并为同一个段，
-    输出每个段的起始帧、结束帧、时间范围和包含的帧数。
+    Iterates through the duplicate frames list and merges frames
+    with consecutive indices into segments, outputting start/end
+    frame indices, time ranges, and frame counts.
 
     Args:
-        dup_frames: 重复帧详情列表，每个元素包含 frame_index 和 timestamp。
-        fps: 视频帧率，用于时间计算（当前未直接使用，保留参数）。
+        dup_frames: List of duplicate frame dicts, each containing
+                    frame_index and timestamp.
+        fps: Video frame rate (currently unused, kept for API compatibility).
 
     Returns:
-        list[dict]: 合并后的重复帧连续段列表。
+        list[dict]: Merged contiguous duplicate segments.
     """
     if not dup_frames:
         return []
@@ -407,7 +554,7 @@ def _merge_duplicate_ranges(
     for i in range(1, len(dup_frames)):
         cur = dup_frames[i]
         prev = dup_frames[i - 1]
-        # 如果当前帧序号不连续，说明段结束
+        # If current frame index is not consecutive, the segment ends
         if cur["frame_index"] != prev["frame_index"] + 1:
             segments.append({
                 "start_frame": start["frame_index"],
@@ -418,7 +565,7 @@ def _merge_duplicate_ranges(
             })
             start = cur
 
-    # 最后一段
+    # Last segment
     segments.append({
         "start_frame": start["frame_index"],
         "end_frame": dup_frames[-1]["frame_index"],
@@ -438,53 +585,57 @@ def _plot_chart(
     dup_ratio: float,
     output_path: str | Path,
     no_display: bool,
+    fps: float,
 ) -> None:
-    """绘制帧相似度分析图表（相似度曲线 + 分布直方图）并保存。
+    """Plot frame similarity analysis chart (similarity curve + histogram).
 
     Args:
-        similarities: 每帧与上一帧的相似度列表。
-        every_n: 采样间隔帧数。
-        threshold: 重复帧判定阈值。
-        input_name: 输入视频文件名（用于图表标题）。
-        dup_ratio: 重复帧比例。
-        output_path: 图表保存路径。
-        no_display: 是否不显示图表窗口。
+        similarities: List of similarity values between consecutive frames.
+        every_n: Sample interval in frames.
+        threshold: Duplicate detection threshold.
+        input_name: Input video filename (for chart title).
+        dup_ratio: Duplicate frame ratio.
+        output_path: Chart save path.
+        no_display: If True, do not show the chart window.
+        fps: Video frame rate (for x-axis timestamp conversion).
     """
-    x = np.arange(len(similarities)) * every_n
+    x_seconds = np.arange(len(similarities)) * every_n / fps if fps > 0 else np.arange(len(similarities)) * every_n
     sim_arr = np.array(similarities)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=False)
 
-    # ---- 上：相似度曲线 ----
-    ax1.plot(x, sim_arr, "b-", linewidth=0.6, alpha=0.7, label="与上一帧的相似度")
-    ax1.axhline(y=threshold, color="r", linestyle="--", linewidth=0.8, label=f"阈值 ({threshold})")
+    # ---- Top: similarity curve ----
+    ax1.plot(x_seconds, sim_arr, "b-", linewidth=0.6, alpha=0.7, label="Similarity to previous frame")
+    ax1.axhline(y=threshold, color="r", linestyle="--", linewidth=0.8, label=f"Threshold ({threshold})")
     ax1.fill_between(
-        x, sim_arr, threshold,
+        x_seconds, sim_arr, threshold,
         where=(sim_arr >= threshold),
-        color="red", alpha=0.08, label="重复区域",
+        color="red", alpha=0.08, label="Duplicate area",
     )
-    ax1.set_ylabel("与上一帧的相似度")
-    ax1.set_title(f"帧相似度分析 — {input_name}  （重复帧比例: {dup_ratio:.2%}）")
+    ax1.set_xlabel("Timestamp (MM:SS.mmm)")
+    ax1.set_ylabel("Similarity to previous frame")
+    ax1.set_title(f"Frame Similarity Analysis — {input_name}  (Duplicate ratio: {dup_ratio:.2%})")
     ax1.set_ylim(-0.02, 1.05)
+    ax1.xaxis.set_major_formatter(FuncFormatter(lambda s, _: _fmt_time(s)))
     ax1.legend(loc="upper right", fontsize=9)
     ax1.grid(True, alpha=0.25)
 
-    # ---- 下：相似度分布直方图 ----
+    # ---- Bottom: similarity distribution histogram ----
     ax2.hist(sim_arr, bins=80, range=(0, 1), color="steelblue", edgecolor="white", alpha=0.7)
-    ax2.axvline(x=threshold, color="r", linestyle="--", linewidth=0.8, label=f"阈值 ({threshold})")
-    ax2.set_xlabel("与上一帧的相似度")
-    ax2.set_ylabel("帧数")
-    ax2.set_title("相似度分布直方图")
+    ax2.axvline(x=threshold, color="r", linestyle="--", linewidth=0.8, label=f"Threshold ({threshold})")
+    ax2.set_xlabel("Similarity to previous frame")
+    ax2.set_ylabel("Frame count")
+    ax2.set_title("Similarity Distribution Histogram")
     ax2.legend(fontsize=9)
     ax2.grid(True, alpha=0.25)
 
     plt.tight_layout()
 
-    # 保存
+    # Save
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(str(out), dpi=150, bbox_inches="tight")
-    print(f"统计图已保存 → {out}")
+    print(f"Chart saved → {out}")
 
     if not no_display:
         try:
@@ -496,7 +647,7 @@ def _plot_chart(
 
 
 # ---------------------------------------------------------------------------
-# 入口
+# Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
