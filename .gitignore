@@ -1,4 +1,18 @@
+# 运行时生成的数据目录（脚本默认输出到 运行目录/data/）
 **/data
 **/*.txt
 
 **/*.log
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# VS Code
+.vscode/
+

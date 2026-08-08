@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# ═══════════════════════════════════════════════════════════════════════════
+# AIGEN  ⚠️ 警告：本文件由 AI 生成，未经完整人工审查。
+#        可能存在逻辑错误、边界问题或安全隐患，请在使用前仔细核对，切勿盲目信任。
+# ═══════════════════════════════════════════════════════════════════════════
 """
 视频转码脚本
 输入：源路径和目标路径
-功能：判断本地显卡设备以选择编码器，遍历源路径所有视频文件，按高度640等比例缩放后编码。
-已存在目标文件则跳过。
+功能：启动时扫描本机所有可用的 H.264/HEVC 编码器并让用户自选
+（用户不选择时按默认优先级自动挑选），遍历源路径所有视频文件，
+按高度640等比例缩放后编码。已存在目标文件则跳过。
 """
 
 import argparse
@@ -19,6 +24,16 @@ _current_process = None
 _current_target_file = None
 
 VIDEO_EXTENSIONS = {'.mov', '.mp4', '.mkv', '.avi', '.wmv', '.flv', '.webm', '.ts', '.m4v'}
+
+# 默认编码器优先级（从高到低），仅当用户未手动选择时使用
+DEFAULT_ENCODER_PRIORITY = [
+    'h264_nvenc', 'hevc_nvenc',
+    'h264_amf', 'hevc_amf',
+    'h264_qsv', 'hevc_qsv',
+    'h264_videotoolbox', 'hevc_videotoolbox',
+    'h264_mf', 'hevc_mf',
+    'libx264',
+]
 
 
 def run_command(cmd):
@@ -61,14 +76,17 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
-def detect_encoder():
-    """检测本机 FFmpeg 可用的硬件编码器。
+def list_available_encoders():
+    """扫描 ffmpeg 编译支持的 H.264/HEVC 编码器候选。
 
-    依次检查 NVIDIA NVENC、AMD AMF、Intel QSV、Apple VideoToolbox 等硬件编码器，
-    若均不可用则回退到 CPU 软件编码 libx264。
+    运行 ``ffmpeg -encoders`` 并解析输出，收集所有硬件编码器
+    （如 h264_nvenc、hevc_amf 等）以及软件编码器 libx264/libx265。
+    注意：此处列出的只是编译进 ffmpeg 的候选编码器，不代表本机硬件
+    一定可用（如无 NVIDIA 显卡时 h264_nvenc 仍会被列出），真正的
+    可用性需要由 filter_available_encoders 实际编码测试确认。
 
     Returns:
-        tuple[str, str]: 第一个元素为编码器名称，第二个元素为编码设备描述文本。
+        list[str]: 候选编码器名称列表；无法执行 ffmpeg 时返回空列表。
 
     Raises:
         SystemExit: 当未找到 ffmpeg 可执行文件时退出程序。
@@ -77,31 +95,173 @@ def detect_encoder():
         result = run_command(['ffmpeg', '-hide_banner', '-encoders'])
         if isinstance(result, subprocess.CalledProcessError):
             print('错误: 无法执行 ffmpeg，请确认已安装 ffmpeg。')
-            return 'libx264', 'CPU: libx264'
+            return []
 
-        encoders = result.stdout.lower()
-
-        if 'h264_nvenc' in encoders:
-            return 'h264_nvenc', 'NVIDIA NVENC'
-        if 'hevc_nvenc' in encoders:
-            return 'hevc_nvenc', 'NVIDIA NVENC'
-        if 'h264_amf' in encoders:
-            return 'h264_amf', 'AMD AMF'
-        if 'hevc_amf' in encoders:
-            return 'hevc_amf', 'AMD AMF'
-        if 'h264_qsv' in encoders:
-            return 'h264_qsv', 'Intel QSV'
-        if 'hevc_qsv' in encoders:
-            return 'hevc_qsv', 'Intel QSV'
-        if 'h264_videotoolbox' in encoders:
-            return 'h264_videotoolbox', 'Apple VideoToolbox'
-        if 'hevc_videotoolbox' in encoders:
-            return 'hevc_videotoolbox', 'Apple VideoToolbox'
-
-        return 'libx264', 'CPU: libx264'
+        available = set()
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                name = parts[1]
+                # 收集所有 h264_*/hevc_* 硬件编码器及 libx264/libx265
+                if name.startswith(('h264_', 'hevc_')) or name in ('libx264', 'libx265'):
+                    available.add(name)
+        return sorted(available)
     except FileNotFoundError:
         print('错误: 未找到 ffmpeg，可通过 Homebrew 或其他方式安装。')
         sys.exit(1)
+
+
+def describe_encoder(encoder: str) -> str:
+    """返回编码器的人类可读描述文本。
+
+    Args:
+        encoder (str): 编码器名称。
+
+    Returns:
+        str: 编码器的描述文本，未知编码器时返回编码器名称本身。
+    """
+    descriptions = {
+        'h264_nvenc': 'NVIDIA NVENC (H.264)',
+        'hevc_nvenc': 'NVIDIA NVENC (HEVC)',
+        'h264_amf': 'AMD AMF (H.264)',
+        'hevc_amf': 'AMD AMF (HEVC)',
+        'h264_qsv': 'Intel QSV (H.264)',
+        'hevc_qsv': 'Intel QSV (HEVC)',
+        'h264_videotoolbox': 'Apple VideoToolbox (H.264)',
+        'hevc_videotoolbox': 'Apple VideoToolbox (HEVC)',
+        'h264_mf': 'Windows Media Foundation (H.264)',
+        'hevc_mf': 'Windows Media Foundation (HEVC)',
+        'libx264': 'CPU: libx264',
+        'libx265': 'CPU: libx265',
+    }
+    return descriptions.get(encoder, encoder)
+
+
+def test_encoder(encoder: str):
+    """实际测试编码器能否真正工作。
+
+    ``ffmpeg -encoders`` 列出的只是编译进 ffmpeg 的编码器，并不代表
+    本机硬件可用（例如没有 NVIDIA 显卡时 h264_nvenc 会在加载
+    nvcuda.dll 时失败）。该函数通过实际编码一帧测试图来判断编码器
+    能否成功打开并输出数据，失败时提取 ffmpeg 报错原因。
+
+    Args:
+        encoder (str): 编码器名称。
+
+    Returns:
+        tuple[bool, str]: (编码器是否可用, 不可用时的失败原因或空字符串)。
+    """
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
+        # 用 640x360 而非过小的尺寸：部分硬件编码器（如 AMF 的 HEVC）
+        # 对低于最小分辨率要求的输入会拒绝初始化，导致误判为不可用；
+        # 640 高度也与真实转码输出一致，最接近实际场景
+        '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=1',
+        '-frames:v', '1',
+        '-c:v', encoder,
+        '-f', 'null', '-',
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return True, ''
+        lines = [ln.strip() for ln in result.stderr.splitlines() if ln.strip()]
+        # 优先提取包含关键错误信息的一行（如 Cannot load / failed / Could not）
+        keywords = ('cannot load', 'failed', 'could not', 'error while', 'not supported', 'not found')
+        reason = next((ln for ln in lines if any(k in ln.lower() for k in keywords)), None)
+        if reason is None and lines:
+            reason = lines[-1]
+        if reason is None:
+            reason = f'ffmpeg 返回码 {result.returncode}'
+        return False, reason
+    except subprocess.TimeoutExpired:
+        return False, '测试超时'
+    except OSError as exc:
+        return False, str(exc)
+
+
+def filter_available_encoders(candidates):
+    """从候选编码器中过滤出真正可用的编码器。
+
+    逐个对候选编码器进行实际编码测试，剔除本机无法使用的编码器
+    （如无对应硬件、驱动不可用或加载失败），并输出检测进度与
+    不可用原因。
+
+    Args:
+        candidates (list[str]): 候选编码器名称列表。
+
+    Returns:
+        list[str]: 测试通过的可用编码器列表。
+    """
+    if not candidates:
+        return []
+    print('正在检测各编码器是否真正可用（实际编码一帧测试）...')
+    available = []
+    for i, enc in enumerate(candidates, 1):
+        ok, reason = test_encoder(enc)
+        status = '可用' if ok else '不可用'
+        detail = f'（{reason}）' if reason else ''
+        print(f'  [{i}/{len(candidates)}] {enc} ({describe_encoder(enc)}) -> {status}{detail}')
+        if ok:
+            available.append(enc)
+    return available
+
+
+def pick_default_encoder(available_encoders):
+    """根据默认优先级挑选一个默认编码器。
+
+    Args:
+        available_encoders (list[str]): 可用编码器列表。
+
+    Returns:
+        tuple[str, str]: (编码器名称, 设备描述)。列表为空时回退到 libx264。
+    """
+    if not available_encoders:
+        return 'libx264', 'CPU: libx264'
+    for enc in DEFAULT_ENCODER_PRIORITY:
+        if enc in available_encoders:
+            return enc, describe_encoder(enc)
+    # 可用列表中没有默认优先级中的项，取列表第一个
+    enc = available_encoders[0]
+    return enc, describe_encoder(enc)
+
+
+def select_encoder(available_encoders):
+    """让用户从可用编码器列表中自选，用户不选择时使用默认编码器。
+
+    列出所有可用编码器并提示用户输入编号；直接回车时按默认优先级
+    自动挑选（优先硬件编码器，回退 libx264）。
+
+    Args:
+        available_encoders (list[str]): 扫描到的可用编码器列表。
+
+    Returns:
+        tuple[str, str]: (编码器名称, 设备描述)。
+    """
+    if not available_encoders:
+        print('未检测到可用编码器，将使用 CPU 软件编码 libx264。')
+        return 'libx264', 'CPU: libx264'
+
+    default_encoder, default_desc = pick_default_encoder(available_encoders)
+
+    print('检测到以下可用编码器:')
+    for i, enc in enumerate(available_encoders, 1):
+        print(f'  [{i}] {enc} ({describe_encoder(enc)})')
+    print(f'直接回车将使用默认编码器: {default_encoder} ({default_desc})')
+
+    while True:
+        choice = input(f'请选择编码器编号 (1-{len(available_encoders)})，直接回车使用默认: ').strip()
+        if not choice:
+            print(f'未手动选择，使用默认编码器: {default_encoder}')
+            return default_encoder, default_desc
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(available_encoders):
+                enc = available_encoders[idx - 1]
+                return enc, describe_encoder(enc)
+            print(f'无效编号，请输入 1-{len(available_encoders)} 之间的数字。')
+        except ValueError:
+            print('请输入有效的数字编号，或直接回车使用默认。')
 
 
 def build_ffmpeg_command(input_path: Path, output_path: Path, encoder: str, force: bool = False):
@@ -137,8 +297,15 @@ def build_ffmpeg_command(input_path: Path, output_path: Path, encoder: str, forc
         command += ['-c:v', encoder, '-global_quality', '23']
     elif encoder in ('h264_videotoolbox', 'hevc_videotoolbox'):
         command += ['-c:v', encoder, '-b:v', '2500k']
-    else:
+    elif encoder in ('h264_mf', 'hevc_mf'):
+        command += ['-c:v', encoder, '-b:v', '2500k']
+    elif encoder == 'libx265':
+        command += ['-c:v', 'libx265', '-preset', 'medium', '-crf', '23']
+    elif encoder == 'libx264':
         command += ['-c:v', 'libx264', '-preset', 'medium', '-crf', '23']
+    else:
+        # 其他硬件编码器（如 h264_mf、h264_vaapi 等），仅指定编码器
+        command += ['-c:v', encoder]
 
     command += ['-vf', vf, '-c:a', 'aac', '-b:a', '128k', str(output_path)]
     return command
@@ -231,6 +398,25 @@ def format_duration(seconds: float) -> str:
         return f'{m}:{s:02d}'
 
 
+def strip_quotes(raw: str) -> str:
+    """去除路径输入两侧可能携带的引号。
+
+    从终端或资源管理器复制路径时经常带有单引号或双引号
+    （如 'd:\\foo\\bar' 或 "d:\\foo\\bar"），这些引号会让路径
+    无法被正确解析为绝对路径。该函数会移除两侧成对的引号。
+
+    Args:
+        raw (str): 用户输入的原始路径字符串。
+
+    Returns:
+        str: 去除两侧引号后的路径字符串。
+    """
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        return raw[1:-1]
+    return raw
+
+
 def transcode_file(source_file: Path, target_file: Path, encoder: str, source_duration: float = 0.0, force: bool = False):
     """对单个视频文件执行转码操作。
 
@@ -305,8 +491,8 @@ def main():
     parser.add_argument('--force', action='store_true', help='强制覆盖已有目标文件')
     args = parser.parse_args()
 
-    source_input = input('请输入源视频目录路径: ').strip()
-    target_input = input('请输入目标输出目录路径: ').strip()
+    source_input = strip_quotes(input('请输入源视频目录路径: '))
+    target_input = strip_quotes(input('请输入目标输出目录路径: '))
 
     source_root = Path(source_input).expanduser().resolve()
     target_root = Path(target_input).expanduser().resolve()
@@ -320,8 +506,11 @@ def main():
     # 注册 Ctrl+C 信号处理器
     signal.signal(signal.SIGINT, signal_handler)
 
-    encoder, device_name = detect_encoder()
-    print(f'检测到编码设备: {device_name}，使用编码器: {encoder}')
+    # 扫描 ffmpeg 编译支持的候选编码器，并实际测试过滤出真正可用的
+    candidates = list_available_encoders()
+    available_encoders = filter_available_encoders(candidates)
+    encoder, device_name = select_encoder(available_encoders)
+    print(f'选择的编码设备: {device_name}，使用编码器: {encoder}')
 
     video_files = find_video_files(source_root)
     if not video_files:

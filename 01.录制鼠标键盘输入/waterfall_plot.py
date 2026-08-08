@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-从 unified_input_YYYYMMDD_HHMMSS.txt 日志分别绘制键盘、鼠标、手柄三幅瀑布图。
+从 input_YYYYMMDD_HHMMSS.txt 日志分别绘制键盘、鼠标、手柄三幅瀑布图。
 
 横轴为时间（秒），纵轴为事件名，每个事件的按下-抬起区间以水平条显示。
 
 用法：
   python waterfall_plot.py <日志文件路径>
 
-日志格式（由 main.py 生成）：
-  [ISO] K PRESS key=...
-  [ISO] K RELEASE key=...
-  [ISO] M PRESS button=left|right|middle
-  [ISO] M RELEASE button=left|right|middle
-  [ISO] M MOVE x=.. y=..           # 移动被忽略
-  [ISO] G[Xbox] BUTTON_DOWN id=0 key=...
-  [ISO] G[Xbox] BUTTON_UP id=0 key=...
-  [ISO] G[Xbox] AXIS_MOVE id=0 ...  # 轴事件被忽略
+日志格式（由 record.py 生成）：
+  [ISO] K PRESS key=a vk=65
+  [ISO] K RELEASE key=a vk=65
+  [ISO] M PRESS button=left|right|middle|x1|x2
+  [ISO] M RELEASE button=left|right|middle|x1|x2
+  [ISO] M MOVE x=.. y=..            # 移动被忽略
+  [ISO] G[Xbox] BUTTON_DOWN id=0 key=A
+  [ISO] G[Xbox] BUTTON_UP id=0 key=A
+  [ISO] G[Xbox] AXIS_MOVE id=0 stick=L x=.. y=..   # 摇杆/扳机轴事件被忽略
+  # 开头的行是会话信息头，解析时自动跳过
 """
 
 import sys
@@ -43,18 +44,15 @@ KEYBOARD_KEYS = [
     "up", "down", "left", "right", "enter", "backspace",
 ]
 
-MOUSE_KEYS = ["mouse:left", "mouse:middle", "mouse:right"]
+MOUSE_KEYS = ["mouse:left", "mouse:middle", "mouse:right", "mouse:x1", "mouse:x2"]
 
 GAMEPAD_KEYS = [
     "A", "B", "X", "Y",
     "LB", "RB", "L1", "R1",
-    "LT", "RT", "L2", "R2",
-    "L_Stick_X", "L_Stick_Y", "R_Stick_X", "R_Stick_Y",
-    "L_Trigger", "R_Trigger",
-    "D_Up", "D_Down", "D_Left", "D_Right",
     "View", "Menu", "Share", "Options",
     "Xbox", "PS",
     "L3", "R3",
+    "D_Up", "D_Down", "D_Left", "D_Right",
     "Cross", "Circle", "Square", "Triangle",
     "Up", "Down", "Left", "Right",
     "Touchpad",
@@ -126,10 +124,11 @@ def parse_log(filepath: str) -> Dict[str, List[Tuple[float, str, str]]]:
             cat = device_category(dev)
 
             if cat == "K":
-                # [ISO] K PRESS key=a
-                if not detail.startswith("key="):
+                # [ISO] K PRESS key=a vk=65 → 提取 key 名（到空格为止）
+                key_match = re.search(r"key=(\S+)", detail)
+                if not key_match:
                     continue
-                key_name = detail.split("=", 1)[1]
+                key_name = key_match.group(1)
                 all_events["K"].append((ts, act, key_name))
 
             elif cat == "M":
@@ -207,7 +206,8 @@ def plot_waterfall(
         ax: matplotlib 坐标轴对象。
     """
     if not intervals:
-        ax.text(0.5, 0.5, "无事件", ha="center", va="center", transform=ax.transAxes)
+        # 用英文提示，避免 matplotlib 默认字体缺中文字形（跨平台显示为方框）
+        ax.text(0.5, 0.5, "No events", ha="center", va="center", transform=ax.transAxes)
         ax.set_title(title)
         return
 
@@ -256,7 +256,7 @@ def main() -> None:
     # 分别绘制三幅独立窗口
     from pathlib import Path
     log_path = Path(filepath)
-    stem = log_path.stem  # 如 unified_input_20260711_120000
+    stem = log_path.stem  # 如 input_20260711_120000
 
     datasets = [
         (kb_intervals, KEYBOARD_KEYS, "keyboard"),
