@@ -1,4 +1,0 @@
-# 本项目不依赖第三方 Python 包
-# 需要系统已安装 FFmpeg/FFprobe 可执行文件（非 pip 依赖）
-
-

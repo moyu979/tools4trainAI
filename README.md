@@ -39,8 +39,9 @@ tools4trainAI/
 │   ├── waterfall_plot.py                  # 输入事件瀑布图可视化
 │   └── README.md                          # 模块详细说明
 │
-├── 02.匹配视频与日志/           # 视频与操作日志的时间匹配 → README.md
-│   ├── main.py                            # 根据日志时间筛选匹配的视频
+├── 02.匹配视频与日志/           # 视频与操作日志的时间匹配/对齐 → README.md
+│   ├── main.py                            # 单对单·任意开始：按区间重叠匹配
+│   ├── main_hotkey.py                     # 多对多·录制热键：按 Alt+F9/Ctrl+Shift+E 对齐
 │   └── README.md
 │
 ├── 03.视频压缩存储/             # 视频转码压缩以节省存储空间 → README.md
@@ -79,7 +80,9 @@ tools4trainAI/
 
 ### 02. 匹配视频与日志
 
-将录制的游戏视频与对应操作日志进行时间匹配，筛选出有完整操作记录的视频片段。
+将录制的游戏视频与对应操作日志进行时间匹配并对齐裁剪，按对齐开始时间成对命名输出。
+含两个方案：`main.py`（单对单·任意开始，按时间区间重叠匹配）与
+`main_hotkey.py`（多对多·录制热键，按日志中的录制开始快捷键 Alt+F9 / Ctrl+Shift+E 定位对齐）。
 
 > 匹配逻辑与用法详见 → **[02/README.md](02.匹配视频与日志/README.md)**
 
@@ -141,7 +144,7 @@ pip install opencv-python numpy matplotlib
 # 1. 录制操作数据（与游戏同时运行）— 统一记录器（键盘+鼠标+手柄）
 python "01.录制鼠标键盘输入/record.py"
 
-# 2. 将视频与日志匹配
+# 2. 将视频与日志匹配（单对单·任意开始；多对多·录制热键用 main_hotkey.py）
 python "02.匹配视频与日志/main.py" ./logs ./videos ./matched_videos
 
 # 3. 压缩存储原始视频
