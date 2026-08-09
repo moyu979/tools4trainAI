@@ -5,12 +5,19 @@
 # TODO: 尚未跑实际数据验证，请实测后再使用（2026-08-09）
 # ═══════════════════════════════════════════════════════════════════════════
 """
-[单对单·任意开始] 根据日志文件的时间范围，筛选并对齐视频与操作日志。
+多对多·录制热键对齐：以日志中"录制开始快捷键"为锚点，直接对齐视频与日志。
 
-（多对多·录制热键方案见同目录 main_hotkey.py）
+场景（多对多）:
+    日志记录一定先打开，因此日志里必然保存了"开始录制"的快捷键事件：
+        - NVIDIA（ShadowPlay/ReLive 等）: Alt+F9
+        - AMD（ReLive）               : Ctrl+Shift+E
+    每个热键按下 = 一次录制的开始时间点。据此在 ±2 秒容差内去找视频文件，
+    找到后直接把该视频与日志中从热键起的区间对齐裁剪。
 
 日志格式（txt）:
     # 会话信息头（以 # 开头，解析时自动跳过）
+    [2026-05-30T20:22:54.425688] K PRESS key=alt_l vk=164
+    [2026-05-30T20:22:54.425688] K PRESS key=f9 vk=120
     [2026-05-30T20:22:54.425688] M MOVE x=803 y=482
 
 视频文件名格式（支持多种）:
@@ -19,16 +26,13 @@
     2026-07-11 00-08-45.mp4                        短横日期+空格+短横时间(含秒)
     Screenrecorder-2026-06-13-13-21-10-525.mp4     短横日期-时间-毫秒
 
-功能:
-    1. 匹配: 视频时段与日志区间重叠的，整段复制到结果目录（原有行为）。
-    2. 对齐裁剪: 对每个 (视频, 日志) 重叠对取交集区间，生成 ffmpeg 剪切命令
-       （流复制，只生成脚本不运行），把视频裁到仅保留有日志的片段；
-       同时把日志也裁剪到同一区间（删去有日志但没有视频的部分）。
-    3. 视频与日志按对齐后的开始时间命名，成对输出到指定目录，便于后续对齐。
-    4. 兼容以 # 开头的会话信息头。
+输出:
+    对每个 (热键时间点, 视频) 匹配对生成一条 ffmpeg 剪切命令（流复制，只生成
+    不运行），同时把日志裁剪到同一区间；视频与日志按对齐开始时间（热键时间）
+    命名成对输出。
 
 用法:
-    python main.py <log_dir> <video_dir> <result_dir> [aligned_dir]
+    python main_hotkey.py <log_dir> <video_dir> <result_dir> [aligned_dir]
 """
 
 from __future__ import annotations
@@ -37,11 +41,28 @@ import re
 import sys
 import json
 import subprocess
-import shutil
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# 常量与配置
+# ---------------------------------------------------------------------------
+
+TOLERANCE = 2.0              # 找视频的容差（秒），±2
+ALIGNED_SUBDIR = "aligned"          # 对齐输出子目录（相对 result_dir）
+SCRIPT_FILENAME = "cut_ffmpeg_hotkey.bat"  # 汇总脚本文件名（只生成，不运行）
+COPY_CODEC = "copy"                 # 剪切方式：流复制（快、无损；起点可能在关键帧处）
+DEFAULT_MAX_VIDEO_HOURS = 2         # 无法获取时长时的保守假设
+
+# 录制开始快捷键配置：trigger 为触发键，mods 为所需修饰键组（每组满足其一即可）
+RECORD_HOTKEYS = [
+    {"name": "NVIDIA Alt+F9", "trigger": "f9",
+     "mods": [("alt_l", "alt_r")]},
+    {"name": "AMD Ctrl+Shift+E", "trigger": "e",
+     "mods": [("ctrl_l", "ctrl_r"), ("shift_l", "shift_r")]},
+]
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +70,8 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 LOG_TS_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]")
+# 键盘事件：K PRESS / K RELEASE + key=<名字>（与鼠标 M PRESS 区分，用 K 前缀）
+KEY_EVENT_RE = re.compile(r"\bK (PRESS|RELEASE) key=(\S+)")
 
 
 @dataclass
@@ -57,20 +80,11 @@ class LogRange:
     path: Path                            # 日志文件路径
     start: datetime                       # 首个事件时间
     end: datetime                         # 最后一个事件时间
+    hotkeys: list[tuple[datetime, str]] = field(default_factory=list)  # (时间, 名称)
 
 
 def parse_log_timestamp(line: str) -> datetime | None:
-    """从日志行头部提取 ISO 格式时间戳。
-
-    从形如 "[2026-05-30T20:22:54.425688] M MOVE x=803 y=482" 的行中
-    提取并解析方括号内的时间戳部分。
-
-    Args:
-        line: 日志文件中的一行文本。
-
-    Returns:
-        datetime | None: 解析成功返回 datetime 对象，失败返回 None。
-    """
+    """从日志行头部提取 ISO 格式时间戳。"""
     m = LOG_TS_RE.match(line)
     if m:
         try:
@@ -81,18 +95,67 @@ def parse_log_timestamp(line: str) -> datetime | None:
     return None
 
 
-def collect_log_ranges(log_dir: Path) -> list[LogRange]:
-    """扫描日志目录，收集每个日志文件的事件时间区间。
-
-    遍历指定目录下所有 .txt 文件，逐行解析时间戳；以 # 开头的行
-    （会话信息头）自动跳过，只统计事件行的最早和最晚时间作为该文件的记录区间。
+def _hotkey_complete(h: dict, held: set[str]) -> bool:
+    """判断录制热键 h 此刻是否已全部按下。
 
     Args:
-        log_dir: 包含日志 .txt 文件的目录路径。
+        h: 热键配置，含 trigger（触发键）与 mods（修饰键组列表）。
+        held: 当前仍处于按下状态的键集合。
 
     Returns:
-        list[LogRange]: 按起始时间升序排列的日志时间信息列表。
+        bool: 触发键已按住，且每组修饰键中至少有一个被按住时返回 True。
     """
+    if h["trigger"] not in held:
+        return False
+    # 每个修饰键组（如 (ctrl_l, ctrl_r)）只需其中任意一个键被按住即可
+    for group in h["mods"]:
+        if not any(key in held for key in group):
+            return False
+    return True
+
+
+def detect_record_hotkeys(text: str) -> list[tuple[datetime, str]]:
+    """在日志中检测"录制开始"快捷键（如 Alt+F9 / Ctrl+Shift+E）。
+
+    用"按下保持集合"跟踪按键状态，在组合键补全（上升沿）的瞬间记录热键时间点，
+    自动兼容按键先后顺序不同（先按修饰键再按触发键，或反之）。
+
+    Args:
+        text: 日志文件的完整文本。
+
+    Returns:
+        list[tuple[datetime, str]]: [(热键时间点, 热键名称), ...]，按时间升序。
+    """
+    held: set[str] = set()
+    prev: dict[str, bool] = {h["name"]: False for h in RECORD_HOTKEYS}
+    detections: list[tuple[datetime, str]] = []
+
+    for line in text.splitlines():
+        ts = parse_log_timestamp(line)
+        if ts is None:
+            continue
+        m = KEY_EVENT_RE.search(line)
+        if not m:
+            continue
+        action, key = m.group(1), m.group(2)
+        if action == "PRESS":
+            held.add(key)
+        elif action == "RELEASE":
+            held.discard(key)
+        else:
+            continue
+
+        for h in RECORD_HOTKEYS:
+            complete = _hotkey_complete(h, held)
+            if complete and not prev[h["name"]]:
+                detections.append((ts, h["name"]))
+            prev[h["name"]] = complete
+
+    return detections
+
+
+def collect_log_ranges(log_dir: Path) -> list[LogRange]:
+    """扫描日志目录，收集每个日志的时间区间与录制热键时间点。"""
     ranges: list[LogRange] = []
 
     for txt_path in sorted(log_dir.glob("*.txt")):
@@ -100,7 +163,7 @@ def collect_log_ranges(log_dir: Path) -> list[LogRange]:
             text = txt_path.read_text(encoding="utf-8")
         except Exception:
             continue
-        if text.startswith("\ufeff"):  # 兼容带 BOM 的文件
+        if text.startswith("\ufeff"):
             text = text[1:]
 
         file_min: datetime | None = None
@@ -122,6 +185,7 @@ def collect_log_ranges(log_dir: Path) -> list[LogRange]:
                 path=txt_path,
                 start=file_min,
                 end=file_max,
+                hotkeys=detect_record_hotkeys(text),
             ))
 
     return ranges
@@ -195,21 +259,8 @@ def parse_video_start_time(filename: str) -> datetime | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# 视频时长获取（通过 ffprobe）
-# ---------------------------------------------------------------------------
-
 def get_video_duration(video_path: Path) -> float | None:
-    """通过 ffprobe 获取视频文件的时长。
-
-    使用 ffprobe 命令解析视频文件格式信息，提取时长字段。
-
-    Args:
-        video_path: 视频文件的完整路径。
-
-    Returns:
-        float | None: 视频时长（秒），获取失败时返回 None。
-    """
+    """通过 ffprobe 获取视频文件的时长。"""
     try:
         cmd = [
             "ffprobe", "-v", "quiet",
@@ -229,13 +280,8 @@ def get_video_duration(video_path: Path) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# 对齐裁剪：生成 ffmpeg 剪切命令 + 裁剪日志
+# 对齐输出：生成 ffmpeg 剪切命令 + 裁剪日志
 # ---------------------------------------------------------------------------
-
-ALIGNED_SUBDIR = "aligned"          # 对齐输出子目录（相对 result_dir）
-SCRIPT_FILENAME = "cut_ffmpeg.bat"  # 汇总脚本文件名（只生成，不运行）
-COPY_CODEC = "copy"                 # 剪切方式：流复制（快、无损；起点可能在关键帧处）
-
 
 def aligned_name(dt: datetime) -> str:
     """把对齐开始时间转成 Windows 安全的文件名（无冒号，可排序）。"""
@@ -244,14 +290,7 @@ def aligned_name(dt: datetime) -> str:
 
 def build_ffmpeg_cut(input_video: Path, offset: float, duration: float,
                      output_video: Path) -> str:
-    """生成一条 ffmpeg 剪切命令字符串（仅生成，不执行）。
-
-    Args:
-        input_video: 输入视频绝对路径。
-        offset: 相对视频开头的剪切起点（秒）。
-        duration: 剪切时长（秒）。
-        output_video: 输出视频绝对路径。
-    """
+    """生成一条 ffmpeg 剪切命令字符串（仅生成，不执行）。"""
     return (
         f'ffmpeg -y -ss {offset:.3f} -i "{input_video}" '
         f'-t {duration:.3f} -c {COPY_CODEC} '
@@ -261,19 +300,7 @@ def build_ffmpeg_cut(input_video: Path, offset: float, duration: float,
 
 def trim_log(log_path: Path, seg_start: datetime, seg_end: datetime,
              out_path: Path) -> int:
-    """把日志裁剪到 [seg_start, seg_end] 区间，保留 # 开头的会话信息头。
-
-    事件行按时间戳过滤。
-
-    Args:
-        log_path: 原始日志文件路径。
-        seg_start: 保留区间起点。
-        seg_end: 保留区间终点。
-        out_path: 裁剪后输出路径。
-
-    Returns:
-        int: 写入的事件行数。
-    """
+    """把日志裁剪到 [seg_start, seg_end] 区间，保留 # 开头的会话信息头。"""
     try:
         text = log_path.read_text(encoding="utf-8")
     except Exception:
@@ -305,7 +332,7 @@ def _write_script(script_path: Path, commands: list[str]) -> None:
         "@echo off",
         "chcp 65001 >nul",
         "REM ============================================================",
-        "REM tools4trainAI - 对齐裁剪 ffmpeg 脚本（自动生成，请核对后运行）",
+        "REM tools4trainAI - 录制热键对齐裁剪 ffmpeg 脚本（自动生成，请核对后运行）",
         f"REM 共 {len(commands)} 条剪切命令。",
         "REM ============================================================",
         "",
@@ -323,24 +350,21 @@ def _write_script(script_path: Path, commands: list[str]) -> None:
 # 主逻辑
 # ---------------------------------------------------------------------------
 
-DEFAULT_MAX_VIDEO_HOURS = 2  # 无法获取时长时的保守假设
-
-
 def main() -> None:
-    """主函数：匹配视频与日志，并生成对齐裁剪的 ffmpeg 脚本（只生成不运行）。
+    """主函数：按录制热键定位视频并生成对齐裁剪脚本（只生成不运行）。
 
     流程：
     1. 从命令行参数获取日志目录、视频目录、结果目录（可选第 4 个参数为对齐目录）。
-    2. 扫描日志文件，提取每个文件的事件时间区间（兼容 # 会话信息头）。
+    2. 扫描日志，检测每个日志中的"录制开始"快捷键时间点（NVIDIA Alt+F9 / AMD Ctrl+Shift+E）。
     3. 遍历视频文件，解析文件名开始时间并用 ffprobe 获取时长。
-    4. 与任意日志区间重叠的视频整段复制到结果目录（原有行为）。
-    5. 对每个 (视频, 日志) 重叠对取交集区间，生成 ffmpeg 剪切命令（流复制，
-       只生成不运行），同时把日志也裁剪到同一区间，按对齐开始时间命名。
-    6. 汇总生成一个 ffmpeg 脚本文件，输出统计信息。
+    4. 对每个热键时间点，在 ±2 秒容差内找最近的视频并匹配（一个视频只匹配一次）。
+    5. 对每个匹配对，以热键时间为对齐起点，终点取（同日志下一个热键 / 日志结束 / 视频结束）
+       的最小值；生成 ffmpeg 剪切命令（流复制，只生成不运行），并把日志裁剪到同一区间。
+    6. 汇总生成一个 ffmpeg 脚本文件，输出统计（含未匹配项）。
     """
     if len(sys.argv) not in (4, 5):
-        print("用法: python main.py <log_dir> <video_dir> <result_dir> [aligned_dir]")
-        print("示例: python main.py ./log ./video ./result")
+        print("用法: python main_hotkey.py <log_dir> <video_dir> <result_dir> [aligned_dir]")
+        print("示例: python main_hotkey.py ./log ./video ./result")
         sys.exit(1)
 
     log_dir = Path(sys.argv[1])
@@ -349,7 +373,6 @@ def main() -> None:
     aligned_dir = (Path(sys.argv[4]) if len(sys.argv) == 5
                    else result_dir / ALIGNED_SUBDIR)
 
-    # ---- 检查目录 ----
     if not log_dir.is_dir():
         print(f"错误: 日志目录不存在 -> {log_dir}")
         sys.exit(1)
@@ -357,108 +380,121 @@ def main() -> None:
         print(f"错误: 视频目录不存在 -> {video_dir}")
         sys.exit(1)
 
-    # ---- 1. 收集每个 log 文件的时间区间 ----
-    print("正在扫描日志文件...")
+    # ---- 1. 收集日志区间 + 录制热键 ----
+    print("正在扫描日志文件并检测录制热键...")
     log_ranges = collect_log_ranges(log_dir)
     if not log_ranges:
         print("错误: 日志文件中未找到有效时间戳")
         sys.exit(1)
 
-    print(f"共发现 {len(log_ranges)} 个日志文件，时间区间如下:")
+    all_hotkeys: list[tuple[datetime, str, LogRange]] = []
     for lr in log_ranges:
-        print(f"  {lr.path.name}: {lr.start} ~ {lr.end}")
+        for ht, hname in lr.hotkeys:
+            all_hotkeys.append((ht, hname, lr))
+    all_hotkeys.sort(key=lambda x: x[0])
+
+    print(f"共发现 {len(log_ranges)} 个日志文件、{len(all_hotkeys)} 个录制热键:")
+    for lr in log_ranges:
+        hk = ", ".join(f"{t.isoformat()}({n})" for t, n in lr.hotkeys) or "无"
+        print(f"  {lr.path.name}: {lr.start} ~ {lr.end}  热键[{hk}]")
     print()
 
     # ---- 2. 遍历视频文件 ----
     result_dir.mkdir(parents=True, exist_ok=True)
     aligned_dir.mkdir(parents=True, exist_ok=True)
 
-    matched: list[Path] = []
-    skipped: list[str] = []
-    cut_commands: list[str] = []  # 汇总脚本中的 ffmpeg 命令
-    cut_summary: list[tuple[str, str, str, str, str]] = []  # (名字, 视频, 日志, 起点, 终点)
-
     video_files = sorted(video_dir.glob("*.mp4"))
     if not video_files:
         print("警告: 视频目录中没有 .mp4 文件")
         sys.exit(0)
 
-    print(f"共发现 {len(video_files)} 个视频文件，正在匹配...\n")
-
+    videos: list[tuple[Path, datetime, datetime]] = []
     for vp in video_files:
-        video_start = parse_video_start_time(vp.name)
-        if video_start is None:
-            skipped.append(f"无法解析文件名: {vp.name}")
+        vstart = parse_video_start_time(vp.name)
+        if vstart is None:
+            continue
+        dur = get_video_duration(vp)
+        vend = (vstart + timedelta(seconds=dur)) if dur is not None \
+            else vstart + timedelta(hours=DEFAULT_MAX_VIDEO_HOURS)
+        videos.append((vp, vstart, vend))
+
+    print(f"共解析 {len(videos)} 个视频文件，正在按热键匹配...\n")
+
+    # ---- 3. 热键 → 视频匹配（±2 秒，一个视频只匹配一次）----
+    used: set[int] = set()
+    cut_commands: list[str] = []
+    cut_summary: list[tuple[str, str, str, str, str]] = []
+    unmatched_hotkey: list[tuple[datetime, str, Path]] = []
+    unmatched_video: list[Path] = []
+
+    for ht, hname, lr in all_hotkeys:
+        best = None
+        best_diff = float("inf")
+        for idx, (vp, vstart, vend) in enumerate(videos):
+            if idx in used:
+                continue
+            diff = abs((vstart - ht).total_seconds())
+            if diff <= TOLERANCE and diff < best_diff:
+                best = (idx, vp, vstart, vend)
+                best_diff = diff
+
+        if best is None:
+            unmatched_hotkey.append((ht, hname, lr.path))
             continue
 
-        # 获取视频时长
-        duration = get_video_duration(vp)
-        if duration is not None:
-            video_end = video_start + timedelta(seconds=duration)
-            duration_str = f"{duration:.1f}s"
-        else:
-            # ffprobe 不可用时保守估计
-            video_end = video_start + timedelta(hours=DEFAULT_MAX_VIDEO_HOURS)
-            duration_str = f"未知（默认 {DEFAULT_MAX_VIDEO_HOURS}h）"
+        idx, vp, vstart, vend = best
+        used.add(idx)
 
-        # 与当前视频时段有重叠的日志列表
-        overlaps = []
-        for lr in log_ranges:
-            # 视频与日志两个区间只要"头尾搭上"就算重叠：
-            #   条件1：视频开始时间 <= 日志结束时间
-            #   条件2：视频结束时间 >= 日志开始时间
-            if video_start <= lr.end and video_end >= lr.start:
-                overlaps.append(lr)
+        # 对齐区间：起点=热键时间，终点=同日志下一个热键 / 日志结束 / 视频结束 的最小值
+        seg_start = ht
+        # 找同一日志里当前热键之后的下一个热键时间点（作为这段录制的自然结束点）
+        next_hk = None
+        for t, _ in lr.hotkeys:
+            if t > ht:
+                next_hk = t
+                break
+        seg_end = min(next_hk if next_hk else lr.end, lr.end, vend)
+        if seg_end <= seg_start:
+            continue
 
-        if overlaps:
-            shutil.copy2(vp, result_dir / vp.name)
-            matched.append(vp)
-            status = "✅ 匹配"
-        else:
-            status = "  跳过"
+        name = aligned_name(seg_start)
+        out_mp4 = aligned_dir / f"{name}.mp4"
+        out_txt = aligned_dir / f"{name}.txt"
 
-        print(f"  {status}  {vp.name}")
-        print(f"         视频时段: {video_start} ~ {video_end}  (时长 {duration_str})")
+        offset = max(0.0, (seg_start - vstart).total_seconds())
+        seg_dur = (seg_end - seg_start).total_seconds()
 
-        # ---- 逐对生成对齐剪切命令（只生成，不运行）----
-        for lr in overlaps:
-            seg_start = max(video_start, lr.start)
-            seg_end = min(video_end, lr.end)
-            if seg_end <= seg_start:
-                continue
+        cut_commands.append(build_ffmpeg_cut(
+            vp.resolve(), offset, seg_dur, out_mp4.resolve(),
+        ))
+        trim_log(lr.path, seg_start, seg_end, out_txt)
+        cut_summary.append((name, vp.name, lr.path.name, hname,
+                            seg_start.isoformat(), seg_end.isoformat()))
 
-            name = aligned_name(seg_start)
-            out_mp4 = aligned_dir / f"{name}.mp4"
-            out_txt = aligned_dir / f"{name}.txt"
+    for idx, (vp, vstart, _) in enumerate(videos):
+        if idx not in used:
+            unmatched_video.append(vp)
 
-            offset = (seg_start - video_start).total_seconds()
-            seg_dur = (seg_end - seg_start).total_seconds()
-
-            cut_commands.append(build_ffmpeg_cut(
-                vp.resolve(), offset, seg_dur, out_mp4.resolve(),
-            ))
-            trim_log(lr.path, seg_start, seg_end, out_txt)
-            cut_summary.append((name, vp.name, lr.path.name,
-                                seg_start.isoformat(), seg_end.isoformat()))
-
-    # ---- 3. 写汇总脚本（只生成，不运行）----
+    # ---- 4. 写汇总脚本（只生成，不运行）----
     script_path = result_dir / SCRIPT_FILENAME
     _write_script(script_path, cut_commands)
 
-    # ---- 4. 输出汇总 ----
+    # ---- 5. 输出汇总 ----
     print()
     print("=" * 60)
-    print(f"结果目录(整段复制): {result_dir}")
-    print(f"匹配并复制: {len(matched)} / {len(video_files)} 个视频")
     print(f"对齐输出目录: {aligned_dir}")
-    print(f"对齐片段数: {len(cut_summary)}")
-    for name, vname, lname, s, e in cut_summary:
-        print(f"  {name}.mp4/.txt  <-  {vname} × {lname}  [{s} ~ {e}]")
+    print(f"匹配对齐片段: {len(cut_summary)}")
+    for name, vname, lname, hname, s, e in cut_summary:
+        print(f"  {name}.mp4/.txt  <-  {vname} × {lname} ({hname})  [{s} ~ {e}]")
     print(f"ffmpeg 脚本（已生成，未运行）: {script_path}")
-    if skipped:
-        print(f"跳过的文件 ({len(skipped)}):")
-        for s in skipped:
-            print(f"  - {s}")
+    if unmatched_hotkey:
+        print(f"有热键但未找到视频 ({len(unmatched_hotkey)}):")
+        for ht, hname, lpath in unmatched_hotkey:
+            print(f"  {ht.isoformat()} ({hname})  <-  {lpath.name}")
+    if unmatched_video:
+        print(f"有视频但未匹配到热键 ({len(unmatched_video)}):")
+        for vp in unmatched_video:
+            print(f"  {vp.name}")
     print("完成!")
 
 
