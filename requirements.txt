@@ -1,0 +1,20 @@
+# tools4trainAI 项目依赖
+# 由全部 Python 脚本的 import 扫描自动汇总生成
+#
+# 第三方 Python 包
+#
+# 01.录制鼠标键盘输入/main.py
+pynput
+pygame
+#
+# 01.录制鼠标键盘输入/waterfall_plot.py
+# 06.检查录制质量/main.py
+matplotlib
+#
+# 06.检查录制质量/main.py
+opencv-python
+numpy
+scikit-image
+
+# 非 pip 系统依赖（02/03/04 号脚本通过 subprocess 调用）：
+#   FFmpeg / FFprobe 可执行文件，需自行安装并加入 PATH

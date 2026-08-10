@@ -1,6 +1,7 @@
 # 运行时生成的数据目录（脚本默认输出到 运行目录/data/）
 **/data
 **/*.txt
+!requirements.txt
 
 **/*.log
 
