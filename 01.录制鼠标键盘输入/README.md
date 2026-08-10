@@ -222,14 +222,15 @@ pip install pynput>=1.7.6 pygame>=2.5.0 matplotlib>=3.7.0
 
 | 设备 | Windows | macOS | Linux |
 |------|:-------:|:-----:|:-----:|
-| 键盘（pynput） | ✓ | ○ | ○ |
-| 鼠标（pynput） | ✓ | ○ | ○ |
-| 北通 BTP-KP20D（XInput → Xbox 布局） | ✓ | ○ | × |
-| PS4 手柄（DualShock 4） | ○ | ○ | × |
-| PS5 手柄（DualSense） | ○ | ○ | × |
+| 键盘（pynput） | ✓ | × | ○ |
+| 鼠标（pynput） | ✓ | × | ○ |
+| 北通 BTP-KP20D（XInput → Xbox 布局） | ✓ | × | × |
+| PS4 手柄（DualShock 4） | ○ | × | × |
+| PS5 手柄（DualSense） | ○ | × | × |
 
 **说明**：
 
 - **✓**：Windows 下键盘、鼠标、北通 BTP-KP20D 手柄已实测通过（2026-08-09）。
-- **○**：代码已实现 / 映射表已预置，但尚未在对应平台真机验证（含 PS4 / PS5 手柄，映射表已内置但未测试）。
-- **×**：Linux 手柄捕捉逻辑暂未实现（`_get_controller_mapping` 抛 `NotImplementedError`）；键盘/鼠标在 macOS/Linux 上代码可用但未验证。
+- **○**：代码已实现 / 映射表已预置，但尚未在对应平台真机验证（PS4 / PS5 手柄映射表已内置但 Windows 列未实测；键盘/鼠标在 Linux 上代码可用但未验证）。
+- **×（macOS 整列）**：macOS 暂不可用——`record.py` 的手柄线程 `_gamepad_loop` 在**子线程**调用 pygame/SDL，而 macOS 要求 pygame 在主线程运行，会直接崩溃；北通 BTP-KP20D 还会被 SDL 误识别为 NS（Nintendo Switch）手柄导致映射错乱。键盘/鼠标（pynput）在 macOS 上代码可用但未验证，需先解决主线程问题再统一测试。
+- **×（Linux）**：Linux 手柄捕捉逻辑暂未实现（`_get_controller_mapping` 抛 `NotImplementedError`）。
